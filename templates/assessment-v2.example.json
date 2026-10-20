@@ -1,0 +1,48 @@
+{
+  "schema_version": 2,
+  "assignment_id": "inspect-note-storage",
+  "candidate_id": "candidate-EXACT-CURRENT-ID",
+  "result_digest": "EXACT-CURRENT-RESULT-DIGEST",
+  "verdict": "reject",
+  "reason": "incorrect",
+  "rejection": {
+    "origin": "assignment_input",
+    "strategy": "repair_contract_same_profile"
+  },
+  "summary": "Pinned evidence identifies an incorrect input contract; repair it within the same unit and budgets.",
+  "checks": [
+    {
+      "scope": "assignment",
+      "criterion_id": "storage-path",
+      "satisfied": false,
+      "evidence": [
+        {
+          "ref": "/absolute/current/evidence.json",
+          "sha256": "EXACT-MODE-AWARE-FILE-PIN"
+        }
+      ]
+    },
+    {
+      "scope": "assignment",
+      "criterion_id": "root-verification",
+      "satisfied": false,
+      "evidence": [
+        {
+          "ref": "/absolute/current/evidence.json",
+          "sha256": "EXACT-MODE-AWARE-FILE-PIN"
+        }
+      ]
+    },
+    {
+      "scope": "goal",
+      "criterion_id": "A1",
+      "satisfied": false,
+      "evidence": [
+        {
+          "ref": "/absolute/current/evidence.json",
+          "sha256": "EXACT-MODE-AWARE-FILE-PIN"
+        }
+      ]
+    }
+  ]
+}

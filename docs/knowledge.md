@@ -15,15 +15,16 @@
 같은 세션 ID를 여러 디렉터리에서 사용합니다. 다른 대화의 ID를 최근 기록이라는 이유로 선택하지
 않습니다. 새 대화도 프로젝트 지식은 읽을 수 있지만 세션·작업에 한정된 답변은 분리합니다.
 
-## 세션 활성화
+## 작업 단위 결속
 
-스킬을 명시적으로 시작하면 로컬 세션에 활성화 상태를 저장합니다. 이후 모든 입력을 같은
-목표 설정 → 작업 흐름으로 처리하며 작업 완료·새 목표·경로 이동·맥락 압축으로 꺼지지 않습니다.
-매 입력·작업 결과·맥락 압축 뒤에 에이전트가 `orchestration context SESSION_ID`부터 확인합니다. `knowledge context`에도
-현재 `harness` 상태가 포함됩니다. 세션 ID, 지식 저장소, 실행 파일 절대 경로를 함께 유지합니다.
-최초 활성화는 `harness on --provider codex`, 같은 대화의 재활성화는 `--session SESSION_ID`를
-추가하며, 명시적 해제는 `harness off SESSION_ID`입니다. 이 명령들은 Git 없이도 동작합니다.
-해제는 작업·지식·예산을 지우지 않습니다. 다른 대화는 별도 비활성 세션으로 시작합니다.
+`$loop-work <작업 내용>` 또는 `/loop-work <작업 내용>`은 한 작업에만 적용합니다.
+`work open` 또는 개발 `init`로 생성한 작업·세션을
+`harness on --provider codex --session SESSION_ID --task TASK_ID`로 결속합니다.
+진행 중 관련 정정·상태 확인·맥락 압축은 같은 작업이며 무관한 일반 입력은 자동 처리하지 않습니다.
+완료·abort는 결속을 해제하고 작업·지식·예산을 보존합니다. pause/blocker는 완료가 아닙니다.
+`harness off SESSION_ID`는 호환 해제 명령이고 최신 세션을 임의 선택하지 않습니다.
+`orchestration context SESSION_ID --task TASK_ID`로 해당 작업만 복원합니다.
+구형 conversation-wide enabled 상태만으로 새 입력을 자동 처리하지 않습니다.
 
 ## 비개발 작업
 
@@ -36,12 +37,13 @@ python3 .loop/loop.py work assess WORK_ID --input /temporary/assessment.json --p
 python3 .loop/loop.py work finish WORK_ID --input /temporary/result.json
 ```
 
-스킬 활성화에서 받은 `--session SESSION_ID`를 첫 작업부터 사용합니다. 여러 디렉터리는 `--path`를 반복합니다.
+작업 생성에서 받은 세션·작업 ID로 결속하고 관련 명령에 `--session SESSION_ID`를 사용합니다. 여러 디렉터리는 `--path`를 반복합니다.
 `--provider`는 대화, 선택적인 `--worker`는 작업 CLI이며 생략하면 같은 공급자를 씁니다.
 위임은 [위임 규칙](../rules/delegation.md)의 필드를 모두 채웁니다. 여러 경로에 연결된 작업은
 위임할 때 한 경로를 명시해야 합니다. 위 순서는 후보를 내부 검토해 채택한 경우입니다.
-폐기하면 같은 위임을 더 높은 허용 프로필로 재실행합니다. 팀도 후보 검토 후 같은 계획으로
-이어 실행합니다. 사용자에게 평가 JSON이나 다음 프롬프트를 요구하지 않습니다.
+worker-output 품질 실패는 같은 위임을 더 높은 허용 프로필로 재실행합니다. V2 입력·fixture
+수리는 같은 프로필의 연결된 standalone revision으로 처리하며 누적 시도·예산을 보존합니다.
+팀은 revision 1만 지원하며 후보 검토 후 같은 계획으로 이어 실행합니다. 사용자에게 평가 JSON이나 다음 프롬프트를 요구하지 않습니다.
 유형은 `document`, `explanation`, `research`, `review`, `planning`입니다.
 `development`는 기존 개발 엔진에 위임하므로 `work finish`로 완료할 수 없습니다.
 
@@ -64,7 +66,8 @@ python3 .loop/loop.py work finish WORK_ID --input /temporary/result.json
 
 기본 상태 복원은 작은 `orchestration context`로 하고 필요한 상세만 `work context WORK_ID`에서 확인합니다.
 발견 사항은 `work note WORK_ID --text TEXT --evidence REF`,
-장애는 `work block WORK_ID --reason TEXT`로 기록합니다. 복구는 `work resume WORK_ID`,
+장애는 typed 근거 입력을 사용하는 `work block WORK_ID --input BLOCK_JSON`로 기록합니다
+([입력 형식](operations.md#typed-block-and-retirement)). 복구는 `work resume WORK_ID`,
 종료는 `work abort WORK_ID --reason TEXT`입니다. 완료 결과는 파일 변경 이후에도 과거 기록으로 남습니다.
 
 ## 지식 항목
@@ -135,6 +138,72 @@ python3 .loop/loop.py knowledge remember --path /project --session SESSION_ID --
 형식 검사는 빈 값·임시 문구·중복·길이 초과를 거절하고, 표현과 정확성은
 [작성 규칙](../rules/writing.md)에 따라 확인합니다. 긴 설명 자체를 잘라내는 제한은 아닙니다.
 
+## Obsidian 문서 공간
+
+`make install`은 `~/.loop-work/vault` 하나를 준비합니다. Obsidian에서 **Open folder as vault**로
+이 폴더를 열면 됩니다. 앱의 전역 vault 등록·플러그인·동기화 설정은 바꾸지 않습니다.
+
+| 위치 | 역할 |
+| --- | --- |
+| 새 `projects/<project.name--ID>/tasks/<task.title--ID>/현재-<title--ID>.md` | 파일명으로 내용을 구분하는 마지막 출력 |
+| 같은 작업의 한국어 단계·제목·digest snapshot | 미완료·차단·완료의 각 cutoff 기록 |
+| 프로젝트의 `topics/` 및 `topics/global/` | 프로젝트 범위 주제와 전역 주제를 구분하는 설명형 문서 |
+| 한국어 프로젝트·주제·작업 색인 | 새 파일과 기존 관리 파일로 이동하는 링크 |
+| `notes/` | 사람 메모; 승인·작업 지시로 자동 반영하지 않음 |
+
+기존 `projects/<project-id>/tasks/<task-id>/current.md`, `interim/`, `final/`, `topics/<id>.md`
+관리 경로는 이동·삭제하지 않습니다. 편집 충돌이나 생성 파일 삭제도 기존 경로에서 보존하며
+새 복사본을 만들어 우회하지 않습니다. 한국어 색인은 그 파일들을 연결합니다.
+새 경로는 표시 이름과 안정 ID를 함께 쓰며 최초 mapping을 고정해 제목 변경으로 매번 rename하지 않습니다.
+같은 origin의 project ID·원본 scope/session/task identity는 표시 이름과 별개로 유지합니다.
+소유권 manifest의 외부 version 1은 유지하며 새 layout 2 mapping과 문서 role 정보를 추가합니다.
+
+고정 제목·상태 설명·출력 경계는 한국어이고, 에이전트가 쓰는 task title·summary·why·details·
+uncertainty도 한국어로 작성합니다. 고유명사/API는 유지하고 사용자 원문·인용·code·명령·경로·
+증거·hash·JSON key/enum은 번역하지 않습니다. 별도로 요청한 외국어 결과물은 그 언어로 유지하되
+추적 설명은 한국어로 남깁니다. 기존 영어 결론을 exporter가 임의 번역하거나 원본 입력을
+한글 유무로 거절하는 기능은 아닙니다.
+
+현재 문서는 마지막 export cutoff이며 실제 source freshness는 원본 orchestration/DB context에서 확인합니다.
+원본에 `evidence_current=false`가 반영되면 완료 기록의 현재 뷰를 미완료/재확인으로 표시하며
+과거 최종 snapshot은 유지합니다. exporter가 실제 소스를 새로 검증하는 것은 아닙니다.
+이전 미완료·실패 기록을 나중 성공으로 덮거나 파일명만으로 QA·승인을 판정하지 않습니다.
+다음 정상 export 또는 사용자가 실행하는 `make install` backfill에서 소유권 검사에 따라 갱신됩니다.
+이번 구현 자체가 실제 사용자 vault를 동기화하거나 기존 DB 위치를 옮기지는 않습니다.
+
+표준 공유 지식 홈(`~/.loop-work/data`와 재사용 중인 기존 shared 홈)은 선택된 task·topic·
+delegation·team·human-request·feedback·retirement 기록의 DB transaction이 commit된 뒤
+자동 출력합니다. 임의의 별도 지식 홈이나 벤치마크/테스트용 임시 홈은 기본적으로 출력하지 않습니다.
+Python API의 `KnowledgeBase(..., vault_home=ABS_PATH)`로 명시 선택하거나 `vault_home=False`로
+끄며, `sync_vault()`는 모델 호출 없이 기존 기록과 task history를 다시 출력합니다.
+설치 초기의 기존 DB backfill도 같은 출력 경계를 사용합니다. 출력 오류는 경고/진단으로
+남기며 스킬 설치를 막거나 빈 DB·새 작업을 만들지 않습니다.
+`vault_status()`와 지식 홈의 `vault-export-status.json`은 출력 오류·충돌을 보여 주는 진단이며
+작업 완료/승인 판정이 아닙니다. 파일 소유권 pin은 지식 홈의 `vault-owned.json`에 보존합니다. 소유권 files pin·게시 예약(reservations)과 타깃별
+`vault-export-initialized-<targethash>.json`도 지식 홈 백업에 포함하며, 이전에 내보낸 타깃의
+manifest를 잃으면 새 경로·복사본으로 우회하지 않고 해당 문서 출력만 중단합니다.
+작업 원본 SQLite/JSON 저장은 계속되며, 원래 소유권 자료를 복구하기 전에는 재출력을 성공으로 표시하지 않습니다.
+
+보드의 표시·문서 데이터는 vault Markdown에서 읽습니다. SQLite·개발 상태 JSON은 실행·권한·
+검증 상태의 원본이며, 누락된 문서를 DB 화면으로 몰래 대신하지 않습니다. Markdown 본문과
+사람 노트는 읽기·편집 대상으로 보존하되, 파일명·상태 라벨·frontmatter 편집으로 목표·예산·승인·
+게이트를 바꾸지 않습니다. 관리 manifest에 기록된 hash가 맞는 생성 파일만 갱신하며,
+사람이 수정했거나 소유권이 없는 파일은 보존합니다. `.obsidian`과 `notes/`도 덮어쓰지 않습니다.
+출력 실패는 별도 전달 문제로 알리고 이미 저장한 원본 결과나 하네스 작업을 되돌리거나 막지 않습니다.
+
+`$loop-work board serve` / `/loop-work board serve`는 같은 Markdown의 작업 카드·상세·추적·
+사람 요청 화면을 localhost에서 열고 기본 브라우저를 실행합니다. `--no-open`이면 서버만 엽니다.
+기본 공유 홈은 `python3 scripts/loop.py board serve`로 엽니다. 임의 별도 지식 홈은
+`python3 scripts/loop.py --knowledge-home /absolute/knowledge board serve --vault /absolute/vault`처럼
+vault도 명시하며 다른 홈의 문서를 대신 선택하거나 자동 export를 켜지 않습니다.
+문서 revision과 runtime 요청 revision이 맞지 않거나 메타데이터가 없으면 안전하지 않은 응답/실행을
+막고 진단합니다. 응답·승인은 실제 사람의 원문으로만 기록하며 허용 resume 실행은 별도 명시 행동입니다.
+실행이 commit된 뒤 문서 출력만 실패했다면 같은 실행을 재제출하지 않습니다.
+
+보고서의 `.loop`·지식 홈·원본 소스 링크는 로컬 근거입니다. vault만 다른 컴퓨터에 보내면
+해당 파일이 함께 전달되지 않으므로 이식 가능한 근거로 단정하지 않습니다. 실제 공유에는
+요청 범위의 Markdown·필요한 근거 파일을 함께 전달하고 제외된 audit 링크를 구분합니다.
+
 ## 프로젝트 이동과 보존
 
 같은 Git origin의 HTTPS·SSH 주소는 프로젝트 하나로 묶고 작업 트리는 구분합니다.
@@ -142,7 +211,9 @@ origin이 없는 Git worktree는 공통 Git 디렉터리, 일반 디렉터리는
 같은 파일시스템에서 디렉터리 이름이 바뀌면 다시 연결해 위치를 갱신합니다. 원격 주소가 없는 복사본이나
 파일시스템 간 이동은 기존 프로젝트임을 확인한 뒤 `--project`로 연결합니다.
 
-기본 지식 위치는 `~/.local/share/loop-work/`이며 `LOOP_KB_HOME` 또는 전역 옵션
-`--knowledge-home PATH`로 변경합니다. 개발 상태는 각 저장소의 `.loop/state/`에 남습니다.
+새 지식 홈의 기본 위치는 `~/.loop-work/data/`이며 `LOOP_KB_HOME` 또는 전역 옵션
+`--knowledge-home PATH`로 명시 선택하면 그 위치를 우선합니다. 기존
+`~/.local/share/loop-work/` 또는 legacy `loop-dev` DB가 있으면 원래 위치를 재사용합니다.
+여러 기본 후보 경로에 DB가 함께 있으면 원래 지식 홈을 명시하며, 기존 DB·실행 기록을 새 경로로 자동 이동하지 않습니다. 개발 상태는 각 저장소의 `.loop/state/`에 남습니다.
 백업·이동에는 필요한 두 위치를 포함합니다. 자동 클라우드 동기화는 없습니다.
 내부 기록도 금지한 요청은 기록 없이 처리하며, 자격 증명은 지식에 저장하지 않습니다.

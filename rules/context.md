@@ -7,7 +7,7 @@ choose assignments and assess their results.
 
 ## Compact recovery is the default
 
-After every user input, worker result or compaction, run:
+For the bound task, after related user input, worker result or compaction, run:
 
 ```sh
 python3 "$ENTRYPOINT" --knowledge-home "$KNOWLEDGE_HOME" \
@@ -161,7 +161,8 @@ Before asking the user anything, classify the missing context:
 | A dependency discovered mid-task | Add evidence and adjust tactics within fixed scope |
 | Business behavior or material scope ambiguity | Ask before start, with recommended choice |
 | A previously decided matter | Read session decisions, original goal contract and notes; reuse within scope |
-| A new request in the same conversation | Load the same session first; reuse valid analysis and answers |
+| Related input for the bound task | Load its session/task; reuse valid analysis and answers |
+| Unrelated ordinary request | Handle normally; do not activate or create harness work |
 | Changed code or rules | Inspect the affected dependencies; update their summaries |
 | Lost/compacted conversation | Restore the owned session binding and read its orchestration capsule |
 
@@ -172,13 +173,16 @@ required deliverables using `delegation.md`, then inspect their concrete evidenc
 
 ## Session analysis is maintained by the agent
 
-One local session spans repeated requests/goals in one Claude Code or Codex
-conversation. Explicit skill activation returns `session_id`; pass it on every goal
-and task, including the first. Keep the absolute entrypoint and knowledge home beside
+Create one explicit task first; its returned `session_id` and task ID establish
+the binding. Related inputs reuse those IDs. A session history is not authority
+to route later unrelated requests. Keep the absolute entrypoint and knowledge home beside
 it in conversation/compaction handoffs. The orchestration capsule restores whether
-ALL inputs still use the harness, independently of the last task's phase or directory;
+the identified task remains bound, including after directory changes;
 `harness status SESSION_ID` is also available for a focused activation check.
-Do not open a new session on every prompt or select another session by recency.
+Do not open a new session for related corrections/status or select one by recency.
+Only an explicit skill task prompt starts harness work. Completion/abort releases
+automatic routing; unrelated ordinary input never inherits it. Legacy conversation
+enabled flags alone do not establish task authority.
 An identified task/goal can recover a lost binding for its own resumed conversation.
 Separate conversations start inactive with separate IDs, even with the same provider.
 Project knowledge and a goal's presence do not activate a new conversation. No
@@ -255,3 +259,15 @@ re-run relevant checks immediately; the final gate always rechecks the full targ
 Do not write secrets into goals, decisions, notes or logs. Reference credential
 names and setup requirements. Local logs are ignored by Git, but still contain
 project context; share them only intentionally.
+
+## Vault documents and recovery
+
+`~/.loop-work/vault` contains project/task reports for reading in Obsidian. Recover
+control state from the retained knowledge home and development JSON, not from a report
+filename or a hand-edited note. Keep the existing entrypoint/session/task binding and
+read only the needed vault references; do not load the whole vault as worker context.
+Human notes are not automatically instructions or approvals. Capture explicit user
+steering through the normal versioned feedback path before relying on it. Report paths
+confer no new read scope. Missing/stale/edited exports do not reset budgets, alter source
+pins or block the original work. Existing knowledge homes and `.loop` audit paths stay
+where they are; the vault is not an automatic migration or cloud-sync setup.

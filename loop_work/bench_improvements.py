@@ -145,7 +145,7 @@ def write_report(root, spec, value=None, failure=None):
     result = {'verdict': verdict, 'passed': not failure and value.get('passed', False),
         'manifest_hash': value.get('manifest_hash'), 'failure': failure,
         'arms': list(arms),
-        'profiles': {p: {'model': spec['models'][p], 'effort': spec.get('efforts', {}).get(p)} for p in ('claude', 'codex')},
+        'profiles': {p: {'model': spec['models'][p], 'effort': spec.get('efforts', {}).get(p)} for p in sorted(spec['models'])},
         'routing': spec.get('routing'), 'actual_profile_usage': list(actual.values()),
         'worker_outcomes': [{'sample': sample['id'], 'arm': sample['arm'], 'provider': sample['provider'],
                             **sample['usage'].get('worker_outcomes', {'retry_calls': None,

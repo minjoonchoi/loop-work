@@ -1,11 +1,13 @@
 """Paired, reproducible product-outcome benchmarks; no quality claims from unit mocks."""
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import random
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -18,9 +20,10 @@ from .contract import identifier
 from .process import execute
 from .storage import LoopError, digest, file_hash, inside, now, read_json, write_json, write_text
 
+ACTIVATION_PROTOCOL = 'task-scoped-v1'
 ARMS = ('plain', 'candidate')
 KINDS = ('development', 'document', 'explanation', 'research', 'review', 'planning', 'session')
-SOURCE_PATHS = ('scripts/loop.py', 'scripts/install.py', 'scripts/benchmark.py', 'loop_work/', 'rules/', 'templates/', 'skills/loop-work/')
+SOURCE_PATHS = ('Makefile', 'scripts/setup_workspace.py', 'scripts/loop.py', 'scripts/install.py', 'scripts/benchmark.py', 'scripts/runtime.py', 'loop_work/', 'rules/', 'templates/', 'skills/loop-work/')
 
 
 def integer(value, low, high, label):
@@ -74,8 +77,9 @@ def load_suite(path):
         if not fixture.is_dir():
             raise LoopError('Case fixture directory is missing')
         file_map = directory_files(fixture)
-        if any('.loop' in Path(p).parts or p.startswith(('.agents/skills/loop-work/', '.claude/skills/loop-work/',
-                                                           '.agents/skills/loop-dev/', '.claude/skills/loop-dev/')) for p in file_map):
+        discovery = tuple(f'{provider}/skills/{name}/' for provider in ('.agents', '.claude')
+                          for name in ('loop-work', 'loop-dev', 'loop-human'))
+        if any('.loop' in Path(p).parts or any('/' + prefix in '/' + p for prefix in discovery) for p in file_map):
             raise LoopError('Fixtures must not contain loop-work installation or state')
         roots = case.get('roots')
         if not isinstance(roots, list) or not roots or not all(isinstance(x, str) for x in roots) or len(set(roots)) != len(roots):
@@ -177,7 +181,7 @@ def source_snapshot(root):
         path = root / selector
         candidates = path.rglob('*') if selector.endswith('/') else [path]
         for p in candidates:
-            if '__pycache__' in p.parts or p.suffix not in ('.py', '.md', '.json', '.yaml'):
+            if '__pycache__' in p.parts or p.name != 'Makefile' and p.suffix not in ('.py', '.md', '.json', '.yaml', '.html', '.js', '.css'):
                 continue
             if p.is_symlink():
                 raise LoopError('Harness source must not use symlinks')
@@ -189,23 +193,181 @@ def source_snapshot(root):
     return {'hash': digest(contents), 'files': contents}
 
 
+def configuration_identity(path):
+    """Full content plus cooperative filesystem change evidence; never atime."""
+    path = Path(path)
+
+    def metadata(value):
+        return {key: getattr(value, 'st_' + key) for key in
+                ('dev', 'ino', 'mode', 'size', 'mtime_ns', 'ctime_ns')}
+
+    try:
+        link_before = metadata(path.lstat())
+    except FileNotFoundError:
+        def absent_snapshot():
+            # Observe the closest existing directory, not every ancestor's
+            # unrelated activity. Lexical symlink ancestors retain identity too.
+            ancestor = path.parent
+            while True:
+                try:
+                    ancestor_metadata = metadata(ancestor.lstat())
+                    break
+                except FileNotFoundError:
+                    if ancestor == ancestor.parent:
+                        raise LoopError('No observable configuration ancestor: ' + str(path))
+                    ancestor = ancestor.parent
+            resolved_ancestor = ancestor.resolve(strict=True)
+            if not resolved_ancestor.is_dir():
+                raise LoopError('Configuration ancestor is not a directory: ' + str(ancestor))
+            links = {}
+            for parent in path.parents:
+                if parent.is_symlink():
+                    links[str(parent)] = {'metadata': metadata(parent.lstat()),
+                                          'target': os.readlink(parent)}
+            return {'status': 'absent', 'ancestor_path': str(ancestor),
+                    'ancestor_metadata': ancestor_metadata,
+                    'resolved_ancestor': str(resolved_ancestor),
+                    'target_metadata': metadata(resolved_ancestor.stat()), 'ancestor_links': links}
+
+        try:
+            before = absent_snapshot()
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise LoopError('Host configuration appeared while fingerprinting: ' + str(path))
+            after = absent_snapshot()
+            if before != after:
+                raise LoopError('Host configuration ancestor changed while fingerprinting: ' + str(path))
+            return after
+        except OSError as exc:
+            raise LoopError('Cannot fingerprint absent host configuration: ' + str(path)) from exc
+    except OSError as exc:
+        raise LoopError('Cannot fingerprint host configuration: ' + str(path)) from exc
+    try:
+        resolved = path.resolve(strict=True)
+        target_before = metadata(resolved.stat())
+        content = hashlib.sha256(resolved.read_bytes()).hexdigest()
+        target_after = metadata(resolved.stat())
+        link_after = metadata(path.lstat())
+        if link_before != link_after or target_before != target_after:
+            raise LoopError('Host configuration changed while fingerprinting: ' + str(path))
+        return {'status': 'present', 'link_metadata': link_after,
+                'link_target': os.readlink(path) if path.is_symlink() else None,
+                'resolved_path': str(resolved), 'target_metadata': target_after,
+                'content_sha256': content}
+    except OSError as exc:
+        raise LoopError('Cannot fingerprint host configuration: ' + str(path)) from exc
+
+
 def profile_fingerprint():
-    # Hash configuration, not authentication files or environment secrets. Global
-    # host policies still apply; a dedicated benchmark profile is recommended.
+    # Authentication files are never read. Whole-file hashes and non-atime
+    # metadata retain ordinary change-and-restore evidence between boundaries.
     paths = [Path.home() / p for p in ('.codex/config.toml', '.codex/AGENTS.md', '.claude/settings.json', '.claude/CLAUDE.md')]
-    return {str(p): file_hash(p) for p in paths}
+    return {str(p): configuration_identity(p) for p in paths}
+
+
+def profile_observation(expected, phase):
+    actual = profile_fingerprint()
+    return {'phase': phase, 'fingerprint': actual,
+            'changed_paths': sorted(p for p in set(expected) | set(actual)
+                                    if expected.get(p) != actual.get(p))}
+
+
+TRIAL_PLAN_PROTOCOL = 'fixed-trial-identifiers-v1'
+TRIAL_EXPERIMENT_FIELDS = ('activation_protocol', 'arms', 'suite_hash', 'models', 'efforts', 'providers',
+                           'repeats', 'seed', 'environment', 'evaluation', 'routing', 'review_policy')
+
+
+def trial_schedule(spec):
+    """Retain the original seeded case/arm shuffle, independent of trial IDs."""
+    schedule = [(case['id'], provider, repeat) for case in spec['suite']['cases']
+                for provider in spec['providers'] for repeat in range(spec['repeats'])]
+    rng = random.Random(spec['seed'])
+    rng.shuffle(schedule)
+    rows = []
+    for case, provider, repeat in schedule:
+        arms = list(spec['arms'])
+        rng.shuffle(arms)
+        rows.extend({'case': case, 'provider': provider, 'repeat': repeat, 'arm': arm} for arm in arms)
+    return rows
+
+
+def validate_trial_plan(value, spec, output, *, historical=False):
+    fields = {'version', 'output', 'experiment', 'experiment_hash', 'trials', 'seal'}
+    if not isinstance(value, dict) or set(value) != fields or type(value.get('version')) is not int or value['version'] != 1:
+        raise LoopError('Invalid trial-plan schema/version')
+    if value['seal'] != digest({k: v for k, v in value.items() if k != 'seal'}):
+        raise LoopError('Trial-plan seal changed')
+    if (not isinstance(value['output'], str) or not Path(value['output']).is_absolute()
+            or str(Path(value['output']).resolve()) != value['output'] or value['output'] != str(output)):
+        raise LoopError('Trial-plan output does not match the canonical run output')
+    # Only sealed historical reads may use the exact pre-task-scoped experiment.
+    # New execution never infers or strips protocol fields from a supplied plan.
+    if 'activation_protocol' not in spec:
+        if not historical:
+            raise LoopError('New trial-plan execution requires an explicit activation protocol')
+        experiment_fields = tuple(k for k in TRIAL_EXPERIMENT_FIELDS if k != 'activation_protocol')
+    else:
+        if spec['activation_protocol'] != ACTIVATION_PROTOCOL:
+            raise LoopError('Unsupported trial-plan activation protocol')
+        experiment_fields = TRIAL_EXPERIMENT_FIELDS
+    if any(k not in spec for k in experiment_fields):
+        raise LoopError('Trial-plan experiment is missing frozen settings')
+    experiment = {k: spec[k] for k in experiment_fields}
+    if value['experiment'] != experiment or value['experiment_hash'] != digest(experiment):
+        raise LoopError('Trial-plan experiment differs from frozen execution settings, including judge')
+    expected = trial_schedule(spec)
+    rows = value['trials']
+    if not isinstance(rows, list) or len(rows) != len(expected):
+        raise LoopError('Trial-plan must cover the complete frozen schedule')
+    ids, paths = set(), set()
+    cases = {case['id']: case for case in spec['suite']['cases']}
+    for row, target in zip(rows, expected):
+        if not isinstance(row, dict) or set(row) != {'case', 'provider', 'repeat', 'arm', 'id', 'roots'}:
+            raise LoopError('Invalid trial-plan row schema')
+        if type(row['repeat']) is not int or any(row[k] != v for k, v in target.items()):
+            raise LoopError('Trial-plan ordering or case/provider/repeat/arm coverage changed')
+        identity = row['id']
+        if not isinstance(identity, str) or not re.fullmatch('[0-9a-f]{32}', identity) or identity in ids:
+            raise LoopError('Trial-plan requires unique lowercase 32-hex trial IDs')
+        roots = [str(output / 'trials' / identity / 'workspace' / root) for root in cases[row['case']]['roots']]
+        if row['roots'] != roots or any(root in paths for root in roots):
+            raise LoopError('Trial-plan workspace roots differ from exact isolated fixture paths')
+        ids.add(identity)
+        paths.update(roots)
+    return value
+
+
+def load_trial_plan(path, spec, output):
+    path = Path(path).absolute()
+    if path.resolve() != path or not path.is_file() or path.stat().st_size > 2 * 1024 * 1024:
+        raise LoopError('Trial-plan must be a bounded regular file without symlink path components')
+    original = file_hash(path)
+    data = path.read_bytes()
+    content_sha256 = hashlib.sha256(data).hexdigest()
+    try:
+        value = validate_trial_plan(json.loads(data), spec, output)
+    except (ValueError, UnicodeError) as exc:
+        raise LoopError('Cannot read trial-plan JSON') from exc
+    if file_hash(path) != original:
+        raise LoopError('Trial-plan changed while loading')
+    return {'protocol': TRIAL_PLAN_PROTOCOL, 'path': str(path), 'file_hash': original,
+            'content_sha256': content_sha256,
+            'sealed_file_hash': digest({'content': content_sha256, 'executable': False}), 'plan': value}
 
 
 def prepare(suite_path, candidate, models, providers, repeats, seed, environment, efforts=None, evaluation=None,
-            routing_profile=None):
+            routing_profile=None, trial_plan=None, output=None):
     suite, seal, assets = load_suite(suite_path)
     integer(repeats, 1, 100, 'repeats')
     integer(seed, 0, 2**31 - 1, 'seed')
-    bench_transport.validate_efforts(efforts)
+    bench_transport.validate_efforts(efforts, models)
     if evaluation is not None:
         validate_evaluation(evaluation)
-    if set(models) != {'codex', 'claude'} or not all(isinstance(x, str) and x.strip() for x in models.values()):
-        raise LoopError('Pin both Claude and Codex model IDs, including nested workers/reviewers')
+    if not models or not set(models) <= {'codex', 'claude'} or not all(isinstance(x, str) and x.strip() for x in models.values()):
+        raise LoopError('Pin explicit model IDs for all configured providers, including nested workers/reviewers')
     if not providers or any(p not in models for p in providers) or len(set(providers)) != len(providers):
         raise LoopError('Select distinct conversation providers')
     if not isinstance(environment, str) or not environment.strip():
@@ -213,9 +375,11 @@ def prepare(suite_path, candidate, models, providers, repeats, seed, environment
     current = source_snapshot(candidate)
     routing = bench_transport.routing_profile(models, efforts, routing_profile)
     planned_trials = len(suite['cases']) * len(providers) * repeats * len(ARMS)
-    return {'version': 2, 'arms': list(ARMS), 'suite': suite, 'suite_hash': seal, 'assets': assets,
+    spec = {'version': 2, 'activation_protocol': ACTIVATION_PROTOCOL, 'arms': list(ARMS), 'suite': suite, 'suite_hash': seal, 'assets': assets,
             'source': {'candidate': current},
             'models': models, 'efforts': efforts, 'evaluation': evaluation, 'routing': routing,
+            'review_policy': {'version': 1, 'available_providers': sorted(models),
+                              'selection': 'opposite_if_available_else_same_fresh'},
             'goal_types': goal_types(suite),
             'providers': providers, 'repeats': repeats, 'seed': seed,
             'environment': environment, 'profile': profile_fingerprint(),
@@ -223,6 +387,12 @@ def prepare(suite_path, candidate, models, providers, repeats, seed, environment
             'limits': {'conversation_cli_calls': planned_trials * suite['max_calls'],
                        'scenario_wall_seconds': planned_trials * suite['timeout_seconds'],
                        'default_judge_calls': planned_trials * (evaluation['repeats'] if evaluation else 2)}}
+    if trial_plan is not None:
+        if output is None:
+            raise LoopError('A trial-plan requires an explicit run output')
+        spec['trial_plan'] = load_trial_plan(trial_plan, spec, Path(output).resolve())
+        spec['planning_protocol'] = TRIAL_PLAN_PROTOCOL
+    return spec
 
 
 def export_files(root, contents):
@@ -240,12 +410,54 @@ def commit_fixture(root):
             raise LoopError('Could not create isolated fixture repository')
 
 
-def activation(trial):
+def activation_records(trial):
     path = trial / 'knowledge/knowledge.sqlite3'
     if not path.is_file():
-        return []
+        return [], []
     with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True) as db:
-        return [json.loads(r[0]) for r in db.execute("SELECT body FROM records WHERE kind='session'")]
+        rows = [(kind, json.loads(body)) for kind, body in db.execute(
+            "SELECT kind, body FROM records WHERE kind IN ('session','task')")]
+    return ([body for kind, body in rows if kind == 'session'],
+            [body for kind, body in rows if kind == 'task'])
+
+
+def activation(trial):
+    return activation_records(trial)[0]
+
+
+def task_activation(sessions, tasks, provider, previous_session=None, previous_task=None, require_completed=False):
+    """Check persisted task authority, not a host's claimed disabled marker."""
+    if len(sessions) != 1 or len(tasks) != 1:
+        return False, None, None
+    session, task = sessions[0], tasks[0]
+    binding = session.get('harness', {})
+    sid, tid = session.get('id'), task.get('id')
+    if (not identifier(sid) or not identifier(tid) or session.get('provider') != provider
+            or task.get('session_id') != sid or task.get('provider') != provider
+            or binding.get('scope') != 'task' or binding.get('inputs') != 'related'
+            or binding.get('task_id') != tid
+            or previous_session not in (None, sid) or previous_task not in (None, tid)
+            or not binding.get('activated_at')):
+        return False, sid, tid
+    phase = task.get('phase')
+    if require_completed and phase != 'completed':
+        return False, sid, tid
+    if phase in ('completed', 'aborted'):
+        valid = (binding.get('enabled') is False and bool(binding.get('released_at'))
+                 and binding.get('release_reason') == phase)
+    else:
+        valid = (phase in ('goal_setting', 'draft', 'plan', 'running', 'preflight', 'ready', 'working', 'implementing',
+                           'blocked', 'stopped', 'reviewing', 'verifying')
+                 and binding.get('enabled') is True and not binding.get('released_at'))
+    return valid, sid, tid
+
+
+def check_task_activation(arm, sessions, tasks, provider, previous_session=None, previous_task=None, require_completed=False):
+    if arm == 'plain':
+        return not sessions and not tasks, None, None
+    if arm != 'candidate':
+        return False, None, None
+    return task_activation(sessions, tasks, provider, previous_session, previous_task, require_completed)
 
 
 def frozen_files(workspace, case):
@@ -273,8 +485,8 @@ def grade(trial, workspace, case, grader):
     return result
 
 
-def run_trial(root, spec, case, provider, repeat, arm, sources, suite_home, executables):
-    sample = uuid.uuid4().hex
+def run_trial(root, spec, case, provider, repeat, arm, sources, suite_home, executables, sample_id=None):
+    sample = sample_id if sample_id is not None else uuid.uuid4().hex
     trial = root / 'trials' / sample
     trial.mkdir(parents=True)
     workspace = trial / 'workspace'
@@ -295,12 +507,20 @@ def run_trial(root, spec, case, provider, repeat, arm, sources, suite_home, exec
         before = frozen_files(workspace, case)
     record = {'id': sample, 'case': case['id'], 'provider': provider, 'repeat': repeat, 'arm': arm,
               'status': 'running', 'errors': [], 'turns': [], 'checks': {}, 'quality': None,
-              'seconds': 0, 'activation_valid': True}
+              'seconds': 0, 'activation_valid': True, 'profile_observations': []}
     write_json(trial / 'result.json', record)
-    responses, session, harness_session = [], None, None
+    responses, session, harness_session, harness_task = [], None, None, None
     started = time.monotonic()
     try:
+        observation = profile_observation(spec['profile'], 'trial-start')
+        record['profile_observations'].append(observation)
+        if observation['changed_paths']:
+            raise LoopError('Host profile changed before trial; evidence retained')
         for index, turn in enumerate(case['turns']):
+            observation = profile_observation(spec['profile'], 'turn-' + str(index) + '-before')
+            record['profile_observations'].append(observation)
+            if observation['changed_paths']:
+                raise LoopError('Host profile changed before turn; evidence retained')
             export_files(workspace, turn.get('before', {}))
             remaining = spec['suite']['timeout_seconds'] - (time.monotonic() - started)
             if remaining <= 0:
@@ -316,25 +536,31 @@ def run_trial(root, spec, case, provider, repeat, arm, sources, suite_home, exec
                 prompt = ('/loop-work ' if provider == 'claude' else '$loop-work ') + prompt
             value = bench_transport.conversation(provider, spec['models'][provider], workspace / turn['root'], trial,
                          trial / 'turns' / str(index), prompt, session, remaining, env)
+            observation = profile_observation(spec['profile'], 'turn-' + str(index) + '-after')
+            record['profile_observations'].append(observation)
+            if observation['changed_paths']:
+                raise LoopError('Host profile changed during turn; evidence retained')
             session = value['session']
             responses.append({'prompt': turn['prompt'], 'root': turn['root'], 'answer': value['answer']})
-            sessions = activation(trial)
-            if arm == 'plain':
-                valid = not any(s.get('harness', {}).get('enabled') for s in sessions)
-            else:
-                valid = len(sessions) == 1 and sessions[0].get('provider') == provider and sessions[0].get('harness', {}).get('enabled') is True
-                if valid:
-                    bound = sessions[0]['id']
-                    valid = harness_session is None or harness_session == bound
-                    harness_session = bound
+            sessions, tasks = activation_records(trial)
+            if spec.get('activation_protocol') != ACTIVATION_PROTOCOL:
+                raise LoopError('Unsupported activation protocol; retain legacy runs without re-execution')
+            valid, harness_session, harness_task = check_task_activation(
+                arm, sessions, tasks, provider, harness_session, harness_task,
+                require_completed=index == len(case['turns']) - 1)
             record['activation_valid'] &= valid
-            record['turns'].append({'index': index, 'session': session, 'harness_session': harness_session, 'activation_valid': valid})
+            record['turns'].append({'index': index, 'session': session,
+                                    'harness_session': harness_session, 'harness_task': harness_task,
+                                    'activation_valid': valid})
             write_json(trial / 'responses.json', responses)
         record['status'] = 'completed'
     except (LoopError, OSError, ValueError, sqlite3.Error) as exc:
         record['status'] = 'failed'
         record['errors'].append(str(exc))
     finally:
+        observation = profile_observation(spec['profile'], 'trial-final')
+        record['profile_observations'].append(observation)
+        record['profile_valid'] = not any(o['changed_paths'] for o in record['profile_observations'])
         record['seconds'] = round(time.monotonic() - started, 3)
         write_json(trial / 'responses.json', responses)
         record['usage'] = bench_transport.usage(trial)
@@ -374,16 +600,28 @@ def run_trial(root, spec, case, provider, repeat, arm, sources, suite_home, exec
 
 
 def run(suite_path, candidate, models, providers, repeats, seed, environment, output, executables=None,
-        efforts=None, evaluation=None, routing_profile=None):
+        efforts=None, evaluation=None, routing_profile=None, trial_plan=None, trial_plan_hash=None):
     spec = prepare(suite_path, candidate, models, providers, repeats, seed, environment, efforts, evaluation,
-                   routing_profile)
+                   routing_profile, trial_plan, output)
     output = Path(output).resolve()
+    if trial_plan_hash is not None and (trial_plan is None or spec['trial_plan']['file_hash'] != trial_plan_hash):
+        raise LoopError('Trial-plan changed after check prevalidation')
     if output.exists() or output.is_relative_to(Path(candidate).resolve()) or output.is_relative_to(Path(suite_path).resolve().parent):
         raise LoopError('Use a new benchmark output directory outside source/suite trees')
     actual = executables or {p: shutil.which(p) for p in models}
     if any(not actual.get(p) for p in models):
-        raise LoopError('Both CLI executables are required; no benchmark result was produced')
+        raise LoopError('Every configured CLI executable is required; no benchmark result was produced')
+    if trial_plan is not None:
+        plan = spec['trial_plan']
+        data = Path(plan['path']).read_bytes()
+        if (hashlib.sha256(data).hexdigest() != plan['content_sha256']
+                or file_hash(Path(plan['path'])) != plan['file_hash']):
+            raise LoopError('Trial-plan changed before execution')
     output.mkdir(parents=True)
+    if trial_plan is not None:
+        sealed_copy = output / 'trial-plan.json'
+        sealed_copy.write_bytes(data)
+        sealed_copy.chmod(0o600)
     sources = {}
     for arm in spec['source']:
         sources[arm] = output / 'sources' / arm
@@ -400,22 +638,24 @@ def run(suite_path, candidate, models, providers, repeats, seed, environment, ou
     write_json(output / 'manifest.json', spec)
     trials = []
     write_json(output / 'index.json', {'manifest_hash': digest(spec), 'trials': [], 'complete': False})
-    schedule = [(case, p, r) for case in spec['suite']['cases'] for p in providers for r in range(repeats)]
-    rng = random.Random(seed)
-    rng.shuffle(schedule)
+    cases = {case['id']: case for case in spec['suite']['cases']}
+    schedule = spec['trial_plan']['plan']['trials'] if trial_plan is not None else trial_schedule(spec)
     try:
-        for case, provider, repeat in schedule:
-            arms = list(spec['arms'])
-            rng.shuffle(arms)
-            for arm in arms:
-                record = run_trial(output, spec, case, provider, repeat, arm, sources, Path(suite_path).resolve().parent, actual)
-                trials.append({'id': record['id'], 'hash': digest(record)})
-                write_json(output / 'index.json', {'manifest_hash': digest(spec), 'trials': trials, 'complete': False})
-                print(json.dumps({'completed': len(trials), 'total': spec['planned_trials'], 'case': case['id'],
-                                  'provider': provider, 'arm': arm, 'status': record['status']}), file=sys.stderr, flush=True)
+        for row in schedule:
+            case, provider, repeat, arm = cases[row['case']], row['provider'], row['repeat'], row['arm']
+            record = run_trial(output, spec, case, provider, repeat, arm, sources,
+                               Path(suite_path).resolve().parent, actual, row.get('id'))
+            trials.append({'id': record['id'], 'hash': digest(record)})
+            write_json(output / 'index.json', {'manifest_hash': digest(spec), 'trials': trials, 'complete': False})
+            print(json.dumps({'completed': len(trials), 'total': spec['planned_trials'], 'case': case['id'],
+                              'provider': provider, 'arm': arm, 'status': record['status']}), file=sys.stderr, flush=True)
     finally:
         _, seal, _ = load_suite(suite_path)
-        complete = len(trials) == spec['planned_trials'] and seal == spec['suite_hash'] and profile_fingerprint() == spec['profile']
+        plan_stable = (trial_plan is None or
+                       file_hash(Path(spec['trial_plan']['path'])) == spec['trial_plan']['file_hash']
+                       and file_hash(output / 'trial-plan.json') == spec['trial_plan']['sealed_file_hash'])
+        complete = plan_stable and len(trials) == spec['planned_trials'] and seal == spec['suite_hash'] and profile_fingerprint() == spec['profile'] and all(
+            read_json(output / 'trials' / t['id'] / 'result.json').get('profile_valid', False) for t in trials)
         write_json(output / 'index.json', {'manifest_hash': digest(spec), 'trials': trials, 'complete': complete})
     from .bench_report import report
     return report(output)
@@ -427,6 +667,19 @@ def read_run(root):
     if index['manifest_hash'] != digest(spec):
         raise LoopError('Benchmark manifest changed; rerun with the intended criteria and inputs')
     comparison_arms(spec)
+    if 'trial_plan' in spec:
+        planned = spec['trial_plan']
+        if (spec.get('planning_protocol') != TRIAL_PLAN_PROTOCOL or planned.get('protocol') != TRIAL_PLAN_PROTOCOL
+                or file_hash(root / 'trial-plan.json') != planned['sealed_file_hash']
+                or read_json(root / 'trial-plan.json') != planned['plan']):
+            raise LoopError('Sealed trial-plan evidence changed')
+        validate_trial_plan(planned['plan'], spec, root, historical=True)
+        expected_ids = [row['id'] for row in planned['plan']['trials']]
+        actual_ids = [entry['id'] for entry in index['trials']]
+        if actual_ids != expected_ids[:len(actual_ids)] or len(actual_ids) > len(expected_ids):
+            raise LoopError('Executed trials differ from the sealed trial-plan schedule')
+        if index['complete'] and len(actual_ids) != len(expected_ids):
+            raise LoopError('Completed run lacks full trial-plan coverage')
     if 'routing' in spec:
         bench_transport.validate_routing(spec['routing'], spec['models'], spec['efforts'])
     rows = []
@@ -444,5 +697,9 @@ def read_run(root):
         for name, original in record['evidence'].items():
             if file_hash(inside(trial, relative(name))) != original:
                 raise LoopError('Benchmark evidence changed: ' + name)
+        if 'trial_plan' in spec:
+            target = spec['trial_plan']['plan']['trials'][len(rows)]
+            if any(record[k] != target[k] for k in ('id', 'case', 'provider', 'repeat', 'arm')):
+                raise LoopError('Executed trial identity differs from its sealed trial-plan row')
         rows.append(record)
     return root, spec, index, rows

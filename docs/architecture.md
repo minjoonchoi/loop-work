@@ -9,7 +9,7 @@ The main session receives compact role results and artifact references; source a
 full worker output and peer exchanges stay in worker contexts and durable records.
 Portable scripts select explicit economical profiles, stage worker candidates,
 apply only assessed proposals, run deterministic
-gates and persist state. The opposite provider to the implementation worker reviews
+gates and persist state. An independent fresh invocation reviews
 development. Other work has an evidence-backed content/completion check by the
 orchestrator without a mandatory loop. There is no SDK, API-key requirement or daemon.
 Worker CLIs can use either provider. Existing vendor/host restrictions on nested calls
@@ -23,11 +23,13 @@ Harness benchmarking also has a standalone terminal entry point: `scripts/benchm
 It manages its own provider conversations; users do not need to open a chat or activate
 the harness skill before running a benchmark.
 
-The user explicitly starts the loop-work skill once. Installed AGENTS.md and CLAUDE.md
-then route every input in that conversation through `work.md`, including new goals,
-questions, documents, corrections and stops. A goal finishing, a task kind or directory
-changing, and context compaction do not disable activation. Only an explicit off
-request disables it; a task pause keeps it active. Separate conversations start off.
+An explicit `$loop-work <prompt>` or `/loop-work <prompt>` starts one task.
+Only related corrections/status and compaction continue its binding. Completion or
+abort releases routing; unrelated ordinary requests never create harness work.
+A bare invocation asks for the missing prompt without state changes. A new explicit
+prompt cannot silently replace an unfinished task. Board/human commands branch
+before activation and preserve the existing binding.
+
 The shared skill has Claude and Codex discovery files with implicit invocation off.
 This is host-agent routing plus persisted state, not a keyword parser or message hook.
 
@@ -42,17 +44,29 @@ This is host-agent routing plus persisted state, not a keyword parser or message
 | Cross-project knowledge | `knowledge.py`; local SQLite, scoped records and dependency checks |
 | Readable records and derived views | `writing.py`, `rules/writing.md`; deterministic Markdown, concise authored fields |
 | Provider entry | `skills/loop-work/`, installed discovery files, managed AGENTS.md/CLAUDE.md blocks |
-| Conversation activation | `harness.py`; explicit on/status/off, shared SQLite session record |
+| Task binding | `harness.py`; explicit on with task ID, terminal release, shared SQLite session record |
 | Harness outcome benchmarks | `benchmark.py`, `bench_transport.py`, `bench_report.py`; isolated paired runs, external grading, comparison gates |
 | Goal completeness | `contract.py` validates structural traceability and decisions |
 | Context reconstruction | `context.py` derives repository inventory, runtime evidence and next action |
 | Reusable conversation analysis | `session.py` stores topics, decisions, dependency fingerprints and goal history |
 | State/gates/recovery | `engine.py` |
-| Independent review | `providers.py` invokes the opposite provider and validates structured output |
+| Independent review | `providers.py` selects the installed opposite CLI or a fresh same-provider call and validates structured output |
 | Bounded subprocesses | `process.py`, argv arrays, stdin EOF, process-group timeout |
 | Freshness/concurrency | `storage.py`, hashes, atomic JSON, POSIX flock |
 
 ## Installation adapters
+
+The user-requested default `make install` also performs explicit workspace setup:
+check for Obsidian, use existing Homebrew to install the app if absent, and prepare
+`~/.loop-work/vault` plus its `.obsidian` directory without replacing existing files.
+This is an installation-stage exception, not a Python runtime dependency. Low-level
+link/copy installers and benchmarks do not run package setup unless explicitly passed
+the workspace setup flag. App-wide vault registration, synchronization and plugin
+configuration are unchanged. Existing selected knowledge records are backfilled during
+setup; an empty database/session/goal is not created just for backfill. Export conflicts
+are warnings with partial/failed view status, preserving notes without preventing skill
+installation. App-install and unsafe-path errors still fail setup explicitly. Uninstall
+retains the app, vault and knowledge data.
 
 `make install` registers user discovery symlinks under `~/.agents/skills` and
 `~/.claude/skills`, backed by owned adapters in `~/.local/share/loop-work/install`.
@@ -84,25 +98,27 @@ installing loop-work; ownership checks and preservation apply unchanged. Old lin
 entrypoints fail closed with migration guidance. The previous knowledge home remains
 in use when its database exists; two existing databases require an explicit home.
 No records or artifact paths are moved, and `.loop/` state paths remain stable.
+For a fresh knowledge home with no existing database, the default is
+`~/.loop-work/data`; explicit knowledge-home/environment selection takes priority.
+Existing `~/.local/share/loop-work` or legacy `loop-dev` databases retain their paths.
+The single `~/.loop-work/vault` is an additional document view, not a data migration.
 
-## Session activation
+## Task binding
 
-`harness on --provider PROVIDER [--session ID]` explicitly enables the bound session.
-Without an ID it creates a fresh conversation; an unknown supplied ID or different
-provider is rejected. `harness status ID` reads that specific session. `harness off ID`
-disables routing without changing goals, knowledge, files or execution budgets.
-The session's `harness` field records `enabled`, `activated_at` and `updated_at`.
-Legacy sessions without this field are inactive. Identical toggles do not create
-repeated history. Changes serialize through a SQLite transaction.
+Create the identified task with `work open` or development `init` first, then run
+`harness on --provider PROVIDER --session SESSION_ID --task TASK_ID`.
+The task must belong to that provider/session. `harness status ID` reads only that
+owned session; `harness off ID` releases routing without resetting tasks or budgets.
+The raw binding records `scope=task`, `inputs=related` and `task_id`. Legacy
+conversation-wide enabled flags are inactive under this protocol. Completion/abort
+stores release metadata with the task transition. A blocker/pause retains the task,
+not permission to route unrelated requests, and consumes no reset budget.
 
-Every new goal/task receives that ID, even the first. `orchestration context SESSION`
-is the main session's default input after user inputs, worker results and compaction.
-Status and the underlying knowledge/development contexts also expose activation.
-Task completion never toggles it. The host preserves `{session_id, knowledge_home, rules_home,
-entrypoint}` in conversation/compaction handoffs. The absolute CLI path works after
-moving to an uninstalled directory, using `--root`/`--path` to select the target.
-No provider-wide "latest session" file is used. Knowledge may be shared across chats;
-activation is never inherited through that knowledge.
+Related input, worker results and compaction restore
+`orchestration context SESSION --task TASK_ID`. Carry `{session_id, task_id,
+knowledge_home, rules_home, entrypoint}`. Directory changes preserve that task.
+No latest-session pointer or project knowledge establishes new invocation authority.
+A second explicit task uses a separate session while another task remains active.
 
 Low-level engine and work commands remain usable independently; `harness on` is an
 explicit agent action, not cryptographic evidence that a vendor skill was invoked.
@@ -123,15 +139,41 @@ rationale, verification and complexity/risk/uncertainty with supporting evidence
 `rules/routing.md` owns this schema. A common task with multiple roots must select one
 root per invocation. Worker status is distinct from parent goal status.
 
+Both `delegate GOAL` and `work delegate TASK` accept `--check`. The read-only
+preflight shares dispatch validation and reads the existing knowledge database
+without registration, derived views, attempts, budgets or provider calls. It reports
+structured diagnostics/remediation, or whether the actual command would dispatch
+or reuse existing evidence. Success is current setup readiness only, not completion
+or model correctness. Actual dispatch repeats validation, including stale candidate
+recovery, runtime/parent/feedback/source seals and routing/budget constraints.
+Existing read inputs must be visible. Absent declared paths produce structured
+warnings rather than blocking existing absence-inspection behavior; the coordinator
+determines whether an absent input is required. Existing directory scope also supports
+absence checks. Compiler logs outside visible source need supplied exact diagnostic notes.
+
 Workers receive only selected current knowledge and fresh prerequisite outputs, plus
 the parent goal, decisions, initial diagnosis, notes, latest gate and prior failure as
 context. Source files are indexed inside explicit read scopes; applicable rules are
 added to that list. Context is evidence, never additional delegated authority. Workers
 cannot recursively invoke the harness, ask users, redelegate or change rules/state.
 Missing scope or information returns a precise blocker to the orchestrator.
+Handoffs preserve original input/output types, return values, errors and data
+preservation requirements. Clear bounded work can combine necessary inspection and
+implementation in one worker unit, while retaining tests and independent gates.
+Required preflight units must be resolved before start; `goal_setting` units cannot
+be rerun afterward. A blocker preserves activation and is not a request to disable.
+
+Worker packets describe their file-pin format: regular files use the SHA-256 of
+canonical JSON containing raw-content SHA-256 and the executable flag, rather than
+raw-content SHA-256 alone. The packet supplies a recomputation recipe. Claimed drift
+must be checked with that algorithm; source and executable-mode changes remain
+subject to the same freshness checks. Process execution defaults Python bytecode
+writes off to avoid incidental cache files invalidating snapshots, preserving explicit
+host environment values and per-call overrides. Source changes still invalidate gates.
 
 Both CLI transports are read-only. Proposed edits are complete UTF-8 file contents
-or deletions with original hashes. A result first becomes a `candidate`; it cannot
+or deletions with original hashes; schema v2 also permits exact-base UTF-8 byte patches
+with a pinned result hash (see operations). A result first becomes a `candidate`; it cannot
 edit source, become prerequisite output, promote findings or relay peer messages.
 The main session reads the candidate and current goal/criterion evidence, then calls
 `assess GOAL` or `work assess TASK`. This is an internal decision, without a user
@@ -146,9 +188,12 @@ The applier records originals, preserves modes and uses atomic replacement per f
 After apply it checks for unexpected source, branch, rule or parent changes. File
 operations are not a multi-file transaction: a filesystem error can leave partial
 edits, which remain recorded with originals. Nothing resets or cleans user changes.
-Rejection quarantines the whole candidate and preserves audit evidence. The next
-same-ID dispatch selects a stronger allowed profile and receives a bounded failure
-reason, without adopting rejected content as facts. Repeating a pending candidate
+Rejection quarantines the whole candidate and preserves audit evidence. Legacy v1
+quality rejection selects a stronger allowed profile. V2 records rejection origin and
+strategy: worker-output failures escalate; contract/fixture repairs retain the profile
+and require a linked standalone request revision. Transport and stale-evidence failures
+do not establish model-quality failure. Every retry remains within shared budgets and
+receives a bounded failure reason, without adopting rejected content as facts. Repeating a pending candidate
 returns its references without spending another worker call.
 
 Assignment IDs are immutable and bound to a working location. Repeating a completed
@@ -188,8 +233,11 @@ per file. Schema checks do not establish that a split is useful; the main sessio
 A recorded quality rejection permits a strictly higher capability and different
 model/effort on the same provider, retaining all budgets. Authentication, permission,
 timeouts, stale input and ambiguous scope are blockers, not escalation evidence.
-Development review stays on the opposite provider with a least-cost suitable profile:
-medium by default, high only for evidenced high risk/uncertainty. Missing eligibility
+Development review pins the installed opposite provider, or the worker provider when
+the opposite CLI is absent, during plan-review. Calls are fresh and read-only; a failed
+selected CLI never causes a provider switch. Selection mode and availability are retained
+in gate routing provenance. Use a least-cost suitable explicit profile:
+medium by default, high for evidenced high complexity, risk or uncertainty. Missing eligibility
 does not lower the review requirement. Ranks are configuration, not measured cost or
 capability; requested settings are recorded without claiming a host honored uncapped effort.
 
@@ -219,7 +267,7 @@ does not depend on vendor-native real-time chat or concurrent writers. Task-wide
 and elapsed budgets, per-assignment attempt limits and a finite team turn limit all
 remain in force; recovery cannot reset them. Existing `delegate` remains appropriate
 for a single bounded unit. Team completion does not replace development checkpoints,
-fresh opposite-provider final review or common content/completion checks.
+fresh independent final review or common content/completion checks.
 
 ## Compact orchestration and user feedback
 
@@ -317,7 +365,7 @@ These checks constrain shape and duplication, not factual or semantic writing qu
 | State | Entry condition | Allowed progress |
 | --- | --- | --- |
 | draft | init | Investigate, clarify, edit contract/discovery, repeat plan review |
-| ready | valid contract + current passing opposite-provider plan review | start on the reviewed snapshot |
+| ready | valid contract + current passing independent plan review | start on the reviewed snapshot |
 | running | frozen inputs and code unchanged since preflight | Implement, note discoveries, checkpoint, finish |
 | blocked | External/protocol failure, mutation, exhausted budget, explicit blocker | Resume if retryable; otherwise abort/new preflight |
 | completed | All milestones + fresh all-checks pass + full review pass | Report while evidence remains current |
@@ -370,8 +418,8 @@ decision becomes a blocker and a separate preflight goal rather than a mid-run q
 
 ## Analysis reused within a conversation
 
-A local session spans multiple goals in the same Claude Code or Codex conversation.
-Explicit skill activation creates or enables its session; every goal passes
+A session retains knowledge history, but only an explicitly invoked task is bound.
+Create the task before binding it; related commands pass
 `--session`. Low-level `init` or `session open` without an ID creates an inactive
 session. The agent carries the ID, absolute entrypoint, rules home and knowledge home in handoffs.
 New conversations use new IDs; the engine never selects the latest cache as a proxy
@@ -418,9 +466,45 @@ checks. Rules instruct agents to record the complete read set and directory-leve
 Development session caches remain under ignored `.loop/state/`, protected by the
 repository lock and atomic writes. Entries are imported into shared knowledge with
 their original dependency stamps; import cannot renew stale evidence. Shared knowledge
-defaults to `~/.local/share/loop-work/` or `LOOP_KB_HOME`, outside source trees. Neither
+uses an explicit `--knowledge-home`/`LOOP_KB_HOME` or reuses existing loop-work/loop-dev
+databases; only a fresh default uses `~/.loop-work/data/`, outside source trees. Neither
 store changes frozen contracts. Older goal state acquires a stable session binding on
 first context read. Reconciliation is request-driven, not a background watcher.
+
+## Obsidian workspace views
+
+The workspace helper keeps the single vault at `~/.loop-work/vault`; it does not
+move an existing database, change app-wide registration, or configure synchronization.
+New vault paths use readable project/task names with stable ID suffixes; current
+notes are named `현재-<title--ID>.md`, and snapshots include Korean stage labels,
+task descriptions and digests. Existing version-1 managed paths stay in place,
+including missing or edited notes: no new alias copy bypasses their ownership state.
+Korean project/topic/task indexes link those original files. Project-scoped topics
+live under their project; global topics under `topics/global`. IDs remain machine
+identity, while a frozen mapping prevents path churn after title changes. The outer
+ownership manifest stays version 1 with optional layout_version=2 path/document
+metadata, and new document frontmatter declares its role. Cutoff/source information
+remains part of each view. An authoritative completed record can produce a final snapshot, but
+that historical file never establishes current source freshness or grants QA authority.
+Topics and scoped worker/control records are separate derived views; human notes
+remain outside generated-file ownership.
+
+Selected task/topic/delegation/team/human-request/feedback/retirement writes enqueue
+export only after their DB transaction commits. Standard shared knowledge homes use
+the single vault automatically; arbitrary custom/temp homes default to disabled, with
+explicit `vault_home` API opt-in. `sync_vault()` rebuilds existing records and task
+history without model calls. `vault_status()` and `vault-export-status.json` expose
+view-delivery diagnostics independently of task completion. A stale completed current
+record is shown as interim while earlier final snapshots retain their historical boundary.
+
+The exporter uses a knowledge-home ownership manifest to update only its pinned
+files, preserving edited/unowned notes and Obsidian settings. Export failures leave
+committed DB/JSON state intact and do not prevent authorized work. Local evidence
+references are labeled as such; copying the vault does not copy `.loop` audit logs
+or the source checkout. Vault Markdown is the board's display/document data source. The runtime DB/JSON
+retain execution, permission and verification authority. Markdown editing is not an
+approval channel or a gate override. No vendor SDK, Python package or running
+Obsidian app is required in the harness execution path.
 
 ## Review protocol
 
@@ -470,7 +554,7 @@ profiles and budgets match. Trial-local CLI wrappers enforce model IDs and effor
 a shared call budget for the conversation and its nested workers/reviewers. Existing
 host policy and authentication remain in effect. No SDK or global hook is installed.
 By default each provider has one pinned model/effort pair. Optional `--routing-profile`
-freezes the same allowed pool for both arms, including both pinned root pairs; nested
+freezes the same allowed pool for both arms, including all pinned root pairs; nested
 calls may select only an allowed pair. The independently fixed judge is unchanged.
 Both arms receive the policy before goal sealing. Mode/policy changes start a separate
 temporal baseline. Per-pair call/failure counts are observable; rejection/escalation
@@ -480,8 +564,16 @@ dimension; the starter session case counts as explanation, alongside development
 
 Each trial gets fresh repositories, knowledge and an explicitly identified provider
 conversation. Later turns resume that conversation, including directory transitions.
-The first harness turn invokes its installed skill; later turns are ordinary prompts.
-Activation checks reject missing bindings or a contaminated plain control. Installation
+The first task turn invokes its installed skill; related later turns continue that task.
+Completion releases routing; a new task requires another explicit invocation.
+New manifests identify `activation_protocol=task-scoped-v1`; this setting enters
+the temporal comparison profile, so conversation-wide legacy baselines cannot be
+compared as unchanged experiments. The current single-task benchmark verifies raw
+task scope/identity, actual task phase and terminal release metadata; extra tasks,
+missing bindings and a contaminated plain control are rejected. The final turn
+requires actual completed phase plus matching disabled/release metadata; blocked
+or aborted results are honest noncompletion, not suite success. This scenario
+constraint does not prohibit a conceptual user task from spanning multiple roots. Installation
 and graders live outside the timed scenario. Timeout cleanup targets the launched
 process group and observed descendants, including nested groups; it is not an OS sandbox.
 
@@ -553,3 +645,120 @@ The implementation deliberately keeps commit/PR/deployment outside automatic eng
 side effects. The active conversation delegates pre-authorized delivery actions to explicit host
 tool calls and reports their actual outcome. Read-only workers cannot publish. Core `completed` means verified development;
 it does not itself assert that a remote deployment or merge occurred.
+
+Benchmark managed provider resolution uses the trial wrapper's absolute path when
+`LOOP_BENCH_PROFILE` is present, independently of tool-shell PATH reconstruction.
+Conversation, development state and common-work knowledge/runs process receipts
+and prompt hashes are reconciled with the call ledger;
+missing or duplicate managed entries invalidate accounting. Legitimate ledger-only
+nested/structured calls remain counted with separate coverage diagnostics. This covers managed runtime calls,
+not arbitrary external execution. Per-turn configuration fingerprints include full resolved contents, link identity and
+non-atime filesystem metadata to retain ordinary change-and-restore evidence. This
+cooperative boundary guard tracks nearest-existing-directory metadata and ancestor
+symlink identities for absent files; unrelated sibling creation/deletion can therefore
+conservatively invalidate a run. Unstable observations fail closed. It does not promise continuous OS-event or adversarial
+metadata-restoration detection. It retains observed host drift as failed evidence without copying or rewriting host configuration.
+
+
+## Evidence-bearing lifecycle and assignment v2
+
+Public `block GOAL --input FILE` and `work block TASK --input FILE` require a
+version-1 typed decision with kind, reason, task scope, retryability and evidence.
+Reason-only public blocking is rejected. External blockers require current file pins;
+a user pause requires recorded explicit pause feedback; budget exhaustion checks actual
+remaining calls/time and unfinished gate attempts. Three failures of one assignment do
+not exhaust the task. Proven internal gate failures use a separate engine path. This
+validates classification, freshness and counters, not the semantic truth of arbitrary
+prose, and promises no host hook, daemon or automatic resumption.
+
+V2 fixes criterion execution ownership (`worker` or `orchestrator`) and verification
+mode. Root-owned checks remain pending (`satisfied: null`) in worker output; acceptance
+still needs every check true with external pinned evidence. Read-only portable workers
+cannot execute `candidate_test`; choose source inspection or an orchestrator receipt.
+Standalone revisions preserve work-unit identity, exact previous-request hash, finite
+attempts and immutable history; teams currently support revision 1 only. Repairs cannot
+weaken criteria, parent contribution, prohibitions or demand. A cumulative correction
+ledger retains prior rows and appends explicit superseding corrections. Its references
+grant no read authority or reuse authority for rejected content.
+
+`retire GOAL --input FILE` / `work retire TASK --input FILE` records an accepted
+replacement graph for rejected, blocked or failed obligations without changing their
+original status. Complete criterion coverage, immutable result/assessment receipts and
+current contribution/evidence pins are checked; self-links, cycles, unaccepted or stale
+replacements fail. Independent consumer edits need not preserve a producer's obsolete
+whole-checkout digest. Stale proof restores the completion barrier. Repeating retirement
+with valid new proof appends a receipt and preserves earlier receipt hashes. Retirement
+does not bypass latest substantive feedback consumption, acceptance criteria or fresh
+final gates. Context exposes original status and valid/stale retirement separately.
+
+Routing retry observations distinguish assignment attempt caps, task calls/time, profile
+ceilings and recovery requirements; an exhausted assignment is not a global stop. Review
+demand retains high complexity, risk or uncertainty from relevant work; scope counts and
+languages are descriptive metadata, not an experimentally established cost model.
+
+## Human-owned requests
+
+`human.py` stores task-bound decisions, approvals and manual-action requests in the
+same knowledge home. The first `human` argument of `skills/loop-work/` routes to
+`rules/human.md` before activation. It exposes the desk to either provider without
+changing activation, session ownership or task identity, and creates no goal. Only
+this mode reads its detailed human instructions; the skill remains explicit-only.
+Responses preserve the person's original text and use optimistic revision checks;
+an answer does not run an action. Only the allowlisted `resume_task` action can be
+manually executed, with existing pause, integrity and finite-budget checks preserved.
+It cannot run arbitrary commands or confer external authorization, QA completion or
+merge authority. The desk does not dispatch worker/model calls.
+
+`human_ui.py` serves vanilla assets from `loop_work/human_ui_assets/` on localhost.
+The CLI and browser use the same desk operations. Linked installs retain the single
+loop-work skill and its original adapter paths. Copied installs and fixed runtime
+snapshots include the human rule, backend and three UI assets; runtime/source seals
+include these dependencies. No separate human skill, global hooks, vendor settings
+or login state are required. The existing `scripts/loop.py human` CLI is unchanged.
+
+## Vault-backed board
+
+The first `board` skill argument routes to `rules/board.md` before activation; bare
+board selects serve. `board serve` starts the localhost UI and opens its actual URL
+in the default browser unless `--no-open` is supplied. It preserves the existing
+entrypoint, knowledge home and session/task binding and never turns the harness on
+or off, selects a recent session, or creates a goal. The legacy human CLI remains
+compatible for request management.
+
+Task cards, details, tracking text and request documents come from vault Markdown,
+not an alternate DB dashboard. Task current/human-request documents carry single-line
+JSON `loop_work` frontmatter with version/kind/id/knowledge_home/record; the document
+body remains the reading/editing surface. That metadata associates a document with
+its original runtime request and does not transfer DB authority to Markdown. Missing/stale/unrecognized documents produce visible
+diagnostics; edited notes remain intact. Runtime actions still validate the original
+request, its revision, the displayed vault revision and execution authority. The real
+person supplies original response text; approval recording and explicit resume execution
+are distinct. A committed action followed by export failure is reported separately
+and must never trigger an automatic action replay. Bounded no-symlink discovery also
+shows vault-only task current documents read-only when absent from the ownership
+inventory; it grants no runtime authority. History failures are isolated per file.
+Task/session-scoped views and mutation receipts omit global per-record export
+identifiers, paths and errors, retaining only non-identifying diagnostic notices. Only the existing allowlisted
+resume action is executable; the board grants no shell, model dispatch or QA authority.
+
+## Direct board steering for the bound task
+
+`POST /api/tasks/:id/control` records the person's original pause/resume/correction/
+constraint without requiring a pending human request. Exact operation ID, task,
+control and vault revisions bind it to the current task. Resume clears feedback
+pause only, not a blocked phase or execution caps. Runtime cancellation probes and
+managed subprocess polling observe pause/off; no OS-wide cancellation or rollback
+is claimed. The UI polls visible state without overlapping reads and preserves
+in-progress drafts. These controls do not activate unrelated conversation inputs.
+
+## Vault language and preserved literals
+
+Vault-only fixed labels/status explanations and boundaries render in Korean.
+Authored task titles and knowledge/tracking conclusions follow `rules/writing.md`;
+shared worker RESULT instructions carry the same policy. Explicit foreign-language
+artifacts retain their requested language with separate Korean tracking. Original
+user text, quotations, code, commands, refs, hashes, JSON keys/enums and proper names
+remain unchanged; rendering does not translate old stored conclusions or infer facts.
+No Hangul validator or new QA/eligibility/budget rule is introduced. Later normal
+exports or an explicitly run install backfill may refresh generated views under
+existing ownership guards; this change does not sync actual user vault contents.

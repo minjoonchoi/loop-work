@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from loop_work.knowledge import KnowledgeBase
-from loop_work.storage import LoopError, digest
+from loop_work.storage import LoopError, digest, file_hash
 from loop_work.work import Work
 from scripts.install import install
 from support import use_fake_routing
@@ -189,6 +189,62 @@ class KnowledgeTests(unittest.TestCase):
         self.assertEqual(self.kb.context(self.locations, query="topic-6")["counts"]["reusable"], 1)
         self.assertIn("Nothing is deleted", Path(first["document"]).read_text())
 
+    def test_finish_checks_all_retained_pins_before_completion_or_knowledge_promotion(self):
+        from loop_work.delegation import Delegation
+        from loop_work.human import HumanDesk
+        from loop_work.storage import read_json
+        from support import fixture_assessment
+        from test_delegation import assignment
+        for human in (False, True):
+            with self.subTest(substantive_human=human):
+                task = self.started()
+                if human:
+                    desk = HumanDesk(self.kb)
+                    asked = desk.create(task["id"], {"id": "finish-choice-" + str(human), "kind": "decision", "title": "Confirm format",
+                        "question": "Keep this format?", "options": [], "action": None})
+                    desk.respond(asked["id"], {"decision": "answer", "text": "Keep the current goal and format."}, 1)
+                request = assignment("finished-unit", goal_criteria=("C1",))
+                request["read_paths"] = ["guide.md"]
+                value = {"status": "done", "summary": "The guide describes cached dependency behavior.",
+                    "outputs": [{"id": row["id"], "content": "The guide records dependencies.", "evidence": ["guide.md:1"]}
+                                for row in request["deliverables"]],
+                    "coverage": [{"criterion_id": row["id"], "satisfied": True, "evidence": "guide.md:1"} for row in request["criteria"]],
+                    "changes": [], "findings": [], "blockers": []}
+                worker = Delegation(self.kb, task["id"], self.root)
+                with patch("loop_work.providers.executable_for", return_value="test-provider"), patch("loop_work.providers.structured_call", return_value=value):
+                    first = worker.run(request)
+                    rejected = fixture_assessment(self.kb, first)
+                    rejected.update(verdict="reject", reason="incorrect", summary="The explanation needs a corrected source interpretation.")
+                    rejected["checks"][0]["satisfied"] = False
+                    worker.assess(rejected)
+                    second = worker.run(request)
+                    worker.assess(fixture_assessment(self.kb, second))
+                record = self.kb.get("delegation", second["assignment"]["id"])
+                targets = [Path(record["assessment_ref"]), Path(record["directory"]) / "dispatch.json",
+                           Path(record["history"][0]["assessment_ref"])]
+                task_before = copy.deepcopy(self.kb.get("task", task["id"]))
+                budget = self.kb.get("worker-budget", task["id"])
+                for target in targets:
+                    with self.subTest(pin=target.name):
+                        original = target.read_bytes()
+                        # Whitespace changes preserve JSON meaning but break its immutable artifact pin.
+                        target.write_bytes(original + b" ")
+                        if target.name == "dispatch.json":
+                            dispatch = read_json(target)
+                            dispatch["before"]["digest"] = "tampered"
+                            target.write_text(json.dumps(dispatch))
+                        revision = digest(self.kb.observe(self.locations))
+                        result = self.result(knowledge=[self.entry(id="must-not-promote-" + str(human))], observed_revision=revision)
+                        with patch("loop_work.providers.structured_call", side_effect=AssertionError("must not call")):
+                            with self.assertRaises(LoopError):
+                                self.work.finish(task["id"], result)
+                        self.assertEqual(self.kb.get("task", task["id"]), task_before)
+                        self.assertEqual(self.kb.get("worker-budget", task["id"]), budget)
+                        self.assertEqual(self.kb.list("topic"), [])
+                        target.write_bytes(original)
+                # The same real accepted artifacts remain usable when intact.
+                self.assertTrue(self.work.finish(task["id"], self.result())["passed"])
+
     def test_non_development_kinds_complete_without_provider_calls_or_project_writes(self):
         original = {p.name: p.read_bytes() for p in self.root.iterdir()}
         with patch("loop_work.providers.review", side_effect=AssertionError("Unexpected review")), \
@@ -242,8 +298,13 @@ class KnowledgeTests(unittest.TestCase):
     def test_block_resume_and_concurrent_update_preserve_state(self):
         task = self.started()
         stale = copy.deepcopy(task)
-        self.work.stop(task["id"], "A source is unavailable.")
-        self.work.stop(task["id"], "The source is still unavailable.")
+        evidence = self.base / "source-blocker.txt"
+        evidence.write_text("The required source is unavailable.")
+        payload = {"version": 1, "kind": "external", "reason": "A source is unavailable.",
+                   "scope": "task", "retryable": True,
+                   "evidence": [{"ref": str(evidence.resolve()), "sha256": file_hash(evidence)}]}
+        self.work.stop(task["id"], payload)
+        self.work.stop(task["id"], {**payload, "reason": "The source is still unavailable."})
         self.assertEqual(self.work.resume(task["id"])["task"]["phase"], "working")
         with self.assertRaisesRegex(LoopError, "concurrently"):
             self.work.save(stale)

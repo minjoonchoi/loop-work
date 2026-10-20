@@ -26,16 +26,18 @@ def routing_profile(models, efforts, value=None):
         value = {'version': 1, 'profiles': [
             {'id': 'fixed-' + provider, 'provider': provider, 'model': models[provider],
              'effort': efforts[provider], 'capability_rank': 100, 'cost_rank': 1}
-            for provider in ('claude', 'codex')],
+            for provider in sorted(models)],
             'requirements': {'low': 100, 'medium': 100, 'high': 100}}
     else:
         mode = 'adaptive'
         if isinstance(value, (str, Path)):
             value = load_policy(value)
     policy = validate_policy(value)
+    if any(p['provider'] not in models for p in policy['profiles']):
+        raise LoopError('Routing catalog contains a provider outside the configured benchmark models')
     pairs = {(p['provider'], p['model'], p['effort']) for p in policy['profiles']}
-    if any((p, models[p], efforts[p]) not in pairs for p in ('claude', 'codex')):
-        raise LoopError('Routing catalog must explicitly include both pinned conversation model/effort pairs')
+    if any((p, models[p], efforts[p]) not in pairs for p in models):
+        raise LoopError('Routing catalog must explicitly include all pinned conversation model/effort pairs')
     return {'mode': mode, 'policy': policy, 'hash': digest(policy)}
 
 
@@ -211,6 +213,8 @@ def relay(provider):
     """Used by trial-local PATH wrappers, including nested workers from older releases."""
     profile = read_json(os.environ['LOOP_BENCH_PROFILE'])
     args = sys.argv[1:]
+    if provider not in profile['models']:
+        raise LoopError('Provider is outside the frozen benchmark catalog')
     binary = profile['executables'][provider]
     if '--version' in args:
         os.execv(binary, [binary, *args])
@@ -231,11 +235,13 @@ def relay(provider):
                   'tokens': None, 'cost_usd': None, 'session': None, 'profile_id': selected['id'],
                   'selection_scope': 'requested model and effort; backend effective settings are unverified',
                   'context': context, 'routing_hash': profile['routing']['hash'],
-                  'prompt_hash': hashlib.sha256(payload).hexdigest()}
+                  'prompt_hash': hashlib.sha256(payload).hexdigest(),
+                  'runtime_receipt': os.environ.get('LOOP_BENCH_RECEIPT')}
         write_json(path, record)
     started = time.monotonic()
     env = dict(os.environ)
     env.pop('LOOP_BENCH_CONVERSATION', None)
+    env.pop('LOOP_BENCH_RECEIPT', None)
     if provider == 'claude':
         env['CLAUDE_CODE_EFFORT_LEVEL'] = effort
     result = subprocess.run([binary, *args], input=payload, capture_output=True, env=env)
@@ -254,10 +260,10 @@ def relay(provider):
 
 
 def prepare_transport(directory, models, max_calls, executables=None, efforts=None, routing=None):
-    validate_efforts(efforts)
+    validate_efforts(efforts, models)
     actual = executables or {p: shutil.which(p) for p in models}
     if any(not actual.get(p) for p in models):
-        raise LoopError('Both Claude and Codex CLIs are required for live harness benchmarks')
+        raise LoopError('Every configured CLI is required for live harness benchmarks')
     routing = validate_routing(routing, models, efforts) if routing else routing_profile(models, efforts)
     profile = {'executables': actual, 'models': models, 'efforts': efforts, 'max_calls': max_calls,
                'ledger': str(directory / 'calls'), 'routing': routing}
@@ -266,7 +272,7 @@ def prepare_transport(directory, models, max_calls, executables=None, efforts=No
     binary_dir = directory / 'bin'
     binary_dir.mkdir()
     package_root = str(Path(__file__).resolve().parent.parent)
-    for provider in models:
+    for provider in ('claude', 'codex'):
         path = binary_dir / provider
         path.write_text('#!' + sys.executable + '\nimport sys\nsys.path.insert(0, ' + repr(package_root) +
                         ')\nfrom loop_work.bench_transport import relay\nrelay(' + repr(provider) + ')\n')
@@ -277,9 +283,10 @@ def prepare_transport(directory, models, max_calls, executables=None, efforts=No
             'LOOP_KB_HOME': str(directory / 'knowledge')}
 
 
-def validate_efforts(efforts):
-    if not isinstance(efforts, dict) or set(efforts) != {'codex', 'claude'} or any(v is None for v in efforts.values()):
-        raise LoopError('Pin explicit effort levels for both Claude and Codex')
+def validate_efforts(efforts, models=None):
+    expected = set(models) if models is not None else {'codex', 'claude'}
+    if not isinstance(efforts, dict) or set(efforts) != expected or any(v is None for v in efforts.values()):
+        raise LoopError('Pin explicit effort levels for every configured provider')
     for provider, value in efforts.items():
         effort_args(provider, value)
 
@@ -299,7 +306,8 @@ def conversation(provider, model, root, trial, directory, prompt, session, timeo
                 '{"mcpServers":{}}', '--add-dir', str(trial), *(['--resume', session] if session else [])]
     directory.mkdir(parents=True)
     (directory / 'prompt.txt').write_text(prompt)
-    process = execute(argv, root, directory, timeout, prompt, {**env, 'LOOP_BENCH_CONVERSATION': '1'}, kill_tree=True)
+    process = execute(argv, root, directory, timeout, prompt, {**env, 'LOOP_BENCH_CONVERSATION': '1',
+                     'LOOP_BENCH_RECEIPT': str((directory / 'process.json').resolve())}, kill_tree=True)
     write_json(directory / 'process.json', process)
     if process['exit_code'] != 0 or process['timed_out']:
         raise LoopError('Conversation failed or exhausted its time budget; inspect process logs')
@@ -409,8 +417,73 @@ def worker_outcomes(trial, records):
             'scope': 'Linked runtime attempt and assessment receipts; absent/incomplete attribution remains unknown'}
 
 
+def reconcile_calls(trial, records):
+    """Reconcile managed runtime receipts; this is not an OS execution sandbox."""
+    from collections import Counter
+    trial = Path(trial).resolve()
+    observed, expected, untyped, errors = Counter(), Counter(), Counter(), []
+    expected_receipts = {}
+    for row in records:
+        key = (row.get('provider'), row.get('prompt_hash'))
+        observed[key] += 1
+        if not row.get('runtime_receipt') and row.get('context', {}).get('role') in ('nested', 'structured'):
+            untyped[key] += 1
+    count = 0
+    for path in trial.rglob('process.json'):
+        # Only conversation receipts and installed harness state belong to this
+        # trial. Grader copies, fixture source and unrelated artifacts do not.
+        relative = path.relative_to(trial)
+        if not (relative.parts[0] == 'turns' or
+                relative.parts[:2] == ('knowledge', 'runs') or
+                relative.parts[0] == 'workspace' and '.loop' in relative.parts and 'state' in relative.parts):
+            continue
+        count += 1
+        if count > 10000:
+            errors.append('Managed process receipt limit exceeded')
+            break
+        try:
+            if (path.is_symlink() or not path.resolve().is_relative_to(trial)
+                    or path.stat().st_size > 2 * 1024 * 1024):
+                raise ValueError('Unbounded process receipt')
+            value = read_json(path)
+            argv = value.get('argv', [])
+            if not argv or Path(argv[0]).name not in ('codex', 'claude') or '--version' in argv:
+                continue
+            prompt = path.parent / 'prompt.txt'
+            if prompt.is_symlink() or not prompt.is_file() or prompt.stat().st_size > 16 * 1024 * 1024:
+                raise ValueError('Missing or unbounded managed prompt')
+            key = (Path(argv[0]).name, hashlib.sha256(prompt.read_bytes()).hexdigest())
+            expected[key] += 1
+            expected_receipts[str(path)] = key
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            errors.append(relative.as_posix() + ': ' + str(exc))
+    receipt_counts = Counter()
+    for row in records:
+        receipt = row.get('runtime_receipt')
+        if receipt:
+            if (not isinstance(receipt, str) or
+                    expected_receipts.get(receipt) != (row.get('provider'), row.get('prompt_hash'))):
+                errors.append('Foreign or unmatched managed runtime receipt: ' + str(receipt))
+            else:
+                receipt_counts[receipt] += 1
+    for receipt in expected_receipts:
+        count = receipt_counts[receipt]
+        if count != 1:
+            errors.append('Managed runtime receipt requires exactly one linked call: ' + receipt +
+                          '; ledger=' + str(count))
+    for key in sorted(set(expected) | set(observed), key=str):
+        if observed[key] < expected[key] or observed[key] - expected[key] > untyped[key]:
+            errors.append('Receipt/ledger mismatch for ' + str(key) + ': receipts=' +
+                          str(expected[key]) + ', ledger=' + str(observed[key]))
+    return {'complete': not errors, 'managed_receipts': sum(expected.values()),
+            'ledger_records': len(records), 'errors': errors[:100],
+            'ledger_only_untyped_calls': sum(untyped.values()),
+            'scope': 'Managed runtime receipts; arbitrary external absolute CLI calls are not intercepted'}
+
+
 def usage(trial):
     records = [read_json(p) for p in sorted((trial / 'calls').glob('*.json'))]
+    accounting = reconcile_calls(trial, records)
     codex = [r for r in records if r['provider'] == 'codex']
     claude = [r for r in records if r['provider'] == 'claude']
     # Claude reports cumulative conversation cost on resume: take the maximum
@@ -438,7 +511,8 @@ def usage(trial):
                 for provider, model, effort in pairs]
     roles = {role: measured([r for r in records if r.get('context', {}).get('role', 'unknown') == role])
              for role in sorted({r.get('context', {}).get('role', 'unknown') for r in records})}
-    return {'provider_calls': len(records), 'calls_complete': bool(records) and all(r.get('status') == 'completed' for r in records),
+    return {'provider_calls': len(records), 'calls_complete': bool(records) and accounting['complete'] and all(r.get('status') == 'completed' for r in records),
+            'accounting': accounting,
             'call_outcomes': measured(records), 'profile_calls': profiles, 'role_calls': roles,
             'profile_scope': 'CLI requested model and effort; backend effective settings are unverified',
             'worker_outcomes': worker_outcomes(trial, records),

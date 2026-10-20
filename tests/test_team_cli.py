@@ -247,7 +247,8 @@ class TeamIntegrationTests(ProjectTest):
         with self.assertRaisesRegex(LoopError, "paused"):
             work.start(task["id"])
         self.assertEqual(work.load(task["id"])["phase"], "goal_setting")
-        work.stop(task["id"], "Await the explicit user resume.")
+        work.stop(task["id"], {"version": 1, "kind": "user_pause", "reason": "Await the explicit user resume.",
+                               "scope": "task", "retryable": True, "evidence": []})
         with self.assertRaisesRegex(LoopError, "paused"):
             work.resume(task["id"])
         self.feedback("resume", "resume-before-start", task["id"])
@@ -279,5 +280,8 @@ class TeamIntegrationTests(ProjectTest):
         value = read_json(path)
         value["summary"] = "A changed receipt cannot establish consumed user feedback."
         write_json(path, value)
-        with self.assertRaisesRegex(LoopError, "worker result is missing or changed"):
+        # The unconditional retained-evidence guard now rejects the altered
+        # artifact before the later substantive-feedback consumption check.
+        with self.assertRaisesRegex(LoopError, "Candidate result artifact changed"):
             work.finish(task["id"], self.result())
+        self.assertEqual(work.load(task["id"])["phase"], "working")

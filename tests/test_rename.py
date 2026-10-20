@@ -25,6 +25,19 @@ class RenameTests(unittest.TestCase):
         """Recreate the previous owned layout, including the old Python wrapper."""
         scope = "project" if project else "user"
         base, files, links = installer._link_layout(self.root, scope, installer.SOURCE)
+        # Freeze the actual pre-human layout. Deriving every current resource
+        # would invent loop-dev ownership of skills that did not exist then.
+        owned_files = {base + "/loop.py", base + "/adapters/codex/SKILL.md",
+                       base + "/adapters/claude/SKILL.md", base + "/adapters/codex/agents/openai.yaml"}
+        owned_links = {base + "/runtime"}
+        for provider, discovery in (("codex", ".agents"), ("claude", ".claude")):
+            owned_links.update({base + "/adapters/" + provider + "/loop.py",
+                                base + "/adapters/" + provider + "/rules",
+                                discovery + "/skills/loop-work"})
+        if project:
+            owned_links.add(".loop/loop.py")
+        files = {name: files[name] for name in owned_files}
+        links = {name: links[name] for name in owned_links}
         rename = lambda text: text.replace("loop-work", "loop-dev").replace("loop_work", "loop_dev")
         files = {rename(name): rename(data.decode()).encode() for name, data in files.items()}
         links = {rename(name): (target if name.endswith("/runtime") else rename(target)) for name, target in links.items()}
@@ -39,7 +52,7 @@ class RenameTests(unittest.TestCase):
             path.symlink_to(target)
         if project:
             for name, body in (("AGENTS.md", installer.BLOCK), ("CLAUDE.md", installer.BLOCK), (".gitignore", installer.IGNORE_BLOCK)):
-                body = rename(body)
+                body = rename(body.replace("/.agents/skills/loop-human\n", "").replace("/.claude/skills/loop-human\n", ""))
                 (self.root / name).write_text("user content\n\n" + body)
                 blocks[name] = {"block": body.rstrip(), "prefix": "\n\n"}
         manifest = self.root / rename(base) / "manifest.json"
@@ -90,6 +103,36 @@ class RenameTests(unittest.TestCase):
         self.assertEqual(manifest.read_bytes(), before)
         self.assertTrue((self.root / ".claude/skills/loop-dev").is_symlink())
 
+    def test_exact_legacy_manifest_does_not_own_new_human_skill(self):
+        manifest = self.legacy()
+        owned = json.loads(manifest.read_text())
+        self.assertEqual(len(owned["files"]), 4)
+        self.assertEqual(len(owned["links"]), 7)
+        for discovery in (".agents", ".claude"):
+            path = self.root / discovery / "skills/loop-human/SKILL.md"
+            path.parent.mkdir(parents=True)
+            path.write_text("Unrelated user human skill")
+        installer.uninstall_links(self.root, legacy=True)
+        for discovery in (".agents", ".claude"):
+            path = self.root / discovery / "skills/loop-human/SKILL.md"
+            self.assertEqual(path.read_text(), "Unrelated user human skill")
+        installer.install_links(self.root)
+        self.assertTrue((self.root / ".agents/skills/loop-work").is_symlink())
+        for discovery in (".agents", ".claude"):
+            self.assertEqual((self.root / discovery / "skills/loop-human/SKILL.md").read_text(), "Unrelated user human skill")
+
+    def test_legacy_manifest_cannot_claim_new_unrelated_human_paths(self):
+        manifest = self.legacy()
+        original = json.loads(manifest.read_text())
+        forged = {**original, "links": {**original["links"], ".agents/skills/loop-human": str(self.root / "user-data")}}
+        write_json(manifest, forged)
+        before = manifest.read_bytes()
+        with self.assertRaisesRegex(LoopError, "ownership manifest"):
+            installer.uninstall_links(self.root, legacy=True)
+        self.assertEqual(manifest.read_bytes(), before)
+        self.assertTrue((self.root / ".agents/skills/loop-dev").is_symlink())
+        self.assertTrue((manifest.parent / "loop.py").is_file())
+
     def test_knowledge_reuses_old_home_and_requires_choice_if_both_exist(self):
         legacy = KnowledgeBase(self.root / ".local/share/loop-dev")
         with patch("pathlib.Path.home", return_value=self.root), patch.dict(os.environ, {}, clear=True):
@@ -103,7 +146,7 @@ class RenameTests(unittest.TestCase):
 
     def test_fresh_knowledge_home_uses_new_name(self):
         with patch("pathlib.Path.home", return_value=self.root), patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(KnowledgeBase().home, self.root / ".local/share/loop-work")
+            self.assertEqual(KnowledgeBase().home, self.root / ".loop-work/data")
 
     def test_benchmark_history_preserved_and_ambiguous_default_rejected(self):
         from loop_work.bench_evolution import location

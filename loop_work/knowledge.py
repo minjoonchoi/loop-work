@@ -16,6 +16,30 @@ from .contract import identifier
 from .storage import HARNESS_SKILL_FILES, LoopError, digest, file_hash, files, git, harness_digest, inside, now
 
 
+def _export_status(value):
+    """Validate only optional exporter diagnostics, never authoritative records."""
+    if not isinstance(value,dict):
+        raise LoopError('Export diagnostics must be an object; original file preserved')
+    def strings(item, field):
+        if field in item and (not isinstance(item[field],list) or not all(isinstance(row,str) for row in item[field])):
+            raise LoopError('Invalid export diagnostics '+field+'; original file preserved')
+    strings(value,'errors'); strings(value,'changed')
+    records=value.get('records',{})
+    if not isinstance(records,dict):
+        raise LoopError('Invalid export diagnostics records; original file preserved')
+    for identity,item in records.items():
+        if not isinstance(identity,str) or not isinstance(item,dict):
+            raise LoopError('Invalid export diagnostics record; original file preserved')
+        strings(item,'errors'); strings(item,'changed')
+        attempt=item.get('export_attempt',0)
+        if type(attempt) is not int or attempt<0:
+            raise LoopError('Invalid export diagnostics attempt; original file preserved')
+        revision=item.get('source_revision',{})
+        if not isinstance(revision,dict) or any(type(revision.get(key,-1)) is not int for key in ('history','records')):
+            raise LoopError('Invalid export diagnostics revision; original file preserved')
+    return value
+
+
 def project_root(path):
     root = Path(path).expanduser().resolve()
     if not root.is_dir():
@@ -46,21 +70,51 @@ def remote_identity(value, root):
     return host.lower() + "/" + path.strip("/").removesuffix(".git")
 
 
+def is_shared_home(path, home=None):
+    """Recognize only known shared stores; ignore unrelated broken destinations."""
+    from .workspace import data
+    base = Path(home).expanduser().resolve() if home is not None else Path.home().resolve()
+    selected = Path(path).expanduser().resolve()
+    for candidate in (base / ".local/share/loop-work", base / ".local/share/loop-dev", data(home)):
+        try:
+            if selected == candidate.resolve():
+                return True
+        except (OSError, RuntimeError):
+            continue
+    return False
+
+
+def default_home(home=None):
+    """Reuse an intact legacy store before inspecting unused new destinations."""
+    from .workspace import data, root
+    base = Path(home).expanduser().resolve() if home is not None else Path.home().resolve()
+    selected_data = data(home)
+    legacy = {path.resolve() for path in (base / ".local/share/loop-work", base / ".local/share/loop-dev")
+              if (path / "knowledge.sqlite3").is_file()}
+    invalid_new = any(path.is_symlink() or path.exists() and not path.is_dir()
+                      for path in (root(home), selected_data))
+    if invalid_new:
+        if len(legacy) == 1:
+            return next(iter(legacy))
+        if not legacy:
+            raise LoopError("Knowledge workspace data must be a real directory: " + str(selected_data))
+    existing = set(legacy)
+    if not invalid_new and (selected_data / "knowledge.sqlite3").is_file():
+        existing.add(selected_data.resolve())
+    if len(existing) > 1:
+        raise LoopError("Both loop-work and loop-dev or multiple knowledge databases exist; select the existing records explicitly with LOOP_KB_HOME or --knowledge-home. No data was moved.")
+    return next(iter(existing)) if existing else selected_data
+
+
 class KnowledgeBase:
-    def __init__(self, home=None):
+    def __init__(self, home=None, *, vault_home=None):
+        from .workspace import vault
         configured = home or os.environ.get("LOOP_KB_HOME")
-        if configured:
-            self.home = Path(configured).expanduser().resolve()
-        else:
-            current = Path.home() / ".local/share/loop-work"
-            legacy = Path.home() / ".local/share/loop-dev"
-            if (legacy / "knowledge.sqlite3").exists():
-                if (current / "knowledge.sqlite3").exists() and current.resolve() != legacy.resolve():
-                    raise LoopError("Both loop-work and loop-dev knowledge databases exist; select the existing "
-                                    "records explicitly with LOOP_KB_HOME or --knowledge-home. No data was moved.")
-                self.home = legacy
-            else:
-                self.home = current
+        self.home = Path(configured).expanduser().resolve() if configured else default_home()
+        self.vault_home = (None if vault_home is False else Path(vault_home).expanduser().absolute()
+                           if vault_home is not None else vault() if is_shared_home(self.home) else None)
+        self._export_pending = {}
+        self._vault_status = {'enabled': self.vault_home is not None, 'status': 'not_exported' if self.vault_home else 'disabled', 'errors': []}
         self.home.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = self.home / "knowledge.sqlite3"
         with self.connection() as db:
@@ -71,11 +125,135 @@ class KnowledgeBase:
     @contextmanager
     def connection(self):
         db = sqlite3.connect(self.path, timeout=5)
+        pending = set()
+        self._export_pending[id(db)] = pending
+        committed = False
         try:
             with db:
                 yield db
+            committed = True
         finally:
+            self._export_pending.pop(id(db), None)
             db.close()
+            if committed and pending and self.vault_home is not None:
+                self._flush_vault_exports(pending)
+
+    def vault_revision(self):
+        """Monotone revision for official put operations; not filesystem freshness."""
+        with self.connection() as db:
+            count, sequence = db.execute("SELECT (SELECT COUNT(*) FROM records), (SELECT COALESCE(MAX(sequence),0) FROM history)").fetchone()
+        return {'records': count, 'history': sequence}
+
+    def _flush_vault_exports(self, pending):
+        from .vault import VaultExporter, read_export_json, export_locked
+        from .storage import locked, read_json, write_json
+        try:
+            attempted = self.vault_revision()
+        except Exception:
+            attempted = {'records': -1, 'history': -1}
+        status_path = self.home / 'vault-export-status.json'
+        try:
+            # Reserve publication order before any rendering can be delayed.
+            with export_locked(self.home / 'vault-export-status'):
+                attempt_path = self.home / 'vault-export-attempt.json'
+                if attempt_path.is_symlink() or status_path.is_symlink():
+                    raise LoopError('Export diagnostics path is a symlink; preserved')
+                counter = read_export_json(attempt_path, {'last_attempt': 0})
+                if type(counter.get('last_attempt')) is not int or counter['last_attempt'] < 0:
+                    raise LoopError('Export attempt counter is invalid')
+                previous_status = _export_status(read_export_json(status_path, {}))
+                retained = [item.get('export_attempt', 0) for item in previous_status.get('records', {}).values()]
+                if any(type(item) is not int or item < 0 for item in retained):
+                    raise LoopError('Retained export attempt is invalid')
+                attempt = max([counter['last_attempt'], *retained]) + 1
+                write_json(attempt_path, {'last_attempt': attempt})
+        except Exception as exc:
+            self._vault_status = {'enabled': True, 'status': 'error', 'vault': str(self.vault_home),
+                                  'errors': ['Export attempt could not be reserved: ' + str(exc)], 'diagnostic_write_failed': True}
+            return
+        incoming = {}
+        for kind, key in sorted(pending):
+            try:
+                result = VaultExporter(self, self.vault_home).export(kind, key)
+            except Exception as exc:
+                # The database transaction already committed. An optional
+                # filesystem/renderer/SQLite read error must not invalidate it.
+                result = {'enabled': True, 'status': 'error', 'errors': [str(exc)]}
+            incoming[kind + '/' + key] = {**result, 'source_revision': result.get('source_revision', attempted), 'export_attempt': attempt}
+        try:
+            # Short diagnostics merge, separate from the rendering lock. Older
+            # completion cannot erase a newer failure for this record.
+            with export_locked(self.home / 'vault-export-status'):
+                if status_path.is_symlink():
+                    raise LoopError('Export status path is a symlink; preserved')
+                previous = _export_status(read_export_json(status_path, {}))
+                records = dict(previous.get('records', {}))
+                order = lambda revision: (revision.get('history', -1), revision.get('records', -1))
+                for identity, item in incoming.items():
+                    if (order(item['source_revision']), item['export_attempt']) >= (order(records.get(identity, {}).get('source_revision', {})), records.get(identity, {}).get('export_attempt', 0)):
+                        records[identity] = item
+                errors = [error for item in records.values() for error in item.get('errors', [])]
+                status = {'enabled': True, 'status': 'conflict' if errors else 'ok',
+                          'vault': str(self.vault_home), 'errors': errors, 'records': records,
+                          'changed': [path for item in incoming.values() for path in item.get('changed', [])], 'at': now()}
+                write_json(status_path, status)
+                self._vault_status = status
+        except Exception as exc:
+            self._vault_status = {'enabled': True, 'status': 'error', 'vault': str(self.vault_home),
+                                  'records': incoming, 'errors': [error for item in incoming.values() for error in item.get('errors', [])]
+                                  + ['Export status could not be saved: ' + str(exc)], 'diagnostic_write_failed': True}
+
+    def vault_status(self):
+        """Compare last exported cutoff with the current committed database."""
+        from .vault import read_export_json
+        if self.vault_home is None:
+            return dict(self._vault_status)
+        result = dict(self._vault_status)
+        path = self.home / 'vault-export-status.json'
+        if path.is_file() and not path.is_symlink():
+            try:
+                persisted = _export_status(read_export_json(path))
+                if result.get('diagnostic_write_failed'):
+                    persisted['errors'] = persisted.get('errors', []) + result.get('errors', [])
+                    persisted['diagnostic_write_failed'] = True
+                result = persisted
+            except (LoopError, OSError, ValueError) as exc:
+                result['errors'] = result.get('errors', []) + ['Export diagnostics unavailable: ' + str(exc)]
+                result['diagnostic_write_failed'] = True
+        try:
+            current = self.vault_revision()
+        except Exception as exc:
+            return {**result, 'status': 'error', 'errors': result.get('errors', []) + ['Current database revision is unavailable: ' + str(exc)]}
+        exported = None
+        manifest = self.home / 'vault-owned.json'
+        if manifest.is_file() and not manifest.is_symlink():
+            try:
+                exported = read_export_json(manifest, {}).get('source_revision')
+            except (LoopError, OSError, ValueError):
+                pass
+        result.update(current_source_revision=current, exported_source_revision=exported)
+        if result.get('diagnostic_write_failed'):
+            result['status'] = 'error'
+        elif exported != current:
+            result['status'] = 'deferred' if result.get('errors') else 'stale'
+        elif result.get('errors'):
+            result['status'] = 'error' if result.get('diagnostic_write_failed') else 'conflict'
+        return result
+
+    def sync_vault(self):
+        """Rebuild optional derived views from existing records, without model work."""
+        selected = ("task", "topic", "delegation", "team", "human-request", "feedback", "retirement")
+        with self.connection() as db:
+            pending = {(kind, key) for kind, key in db.execute("SELECT kind,id FROM records ORDER BY kind,id")
+                       if kind in selected}
+        if self.vault_home is not None:
+            self._flush_vault_exports(pending)
+        return {**self.vault_status(), 'records_considered': len(pending)}
+
+    def export_vault(self, kind, key):
+        if self.vault_home is not None:
+            self._flush_vault_exports({(kind, key)})
+        return self.vault_status()
 
     def get(self, kind, key, required=True):
         with self.connection() as db:
@@ -103,6 +281,16 @@ class KnowledgeBase:
         if old:
             db.execute("INSERT INTO history(kind,id,body,at) VALUES(?,?,?,?)", (kind, value["id"], old[0], now()))
         db.execute("INSERT OR REPLACE INTO records(kind,id,body) VALUES(?,?,?)", (kind, value["id"], encoded))
+        if kind == "task" and value.get("phase") in ("completed", "aborted"):
+            row=db.execute("SELECT body FROM records WHERE kind='session' AND id=?",(value.get("session_id"),)).fetchone()
+            if row:
+                session=json.loads(row[0]); binding=session.get("harness",{})
+                if binding.get("scope")=="task" and binding.get("task_id")==value["id"] and binding.get("enabled") is True:
+                    stamp=now()
+                    session["harness"]={**binding,"enabled":False,"updated_at":stamp,"released_at":stamp,"release_reason":value["phase"]}
+                    self.put("session",session,db)
+        if kind in ("task", "topic", "delegation", "team", "human-request", "feedback", "retirement"):
+            self._export_pending.get(id(db), set()).add((kind, value["id"]))
         return value
 
     def document(self, kind, key):

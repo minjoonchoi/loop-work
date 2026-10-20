@@ -62,10 +62,19 @@ class LinkInstallationTests(unittest.TestCase):
         self.assertEqual(kb.read_bytes(), b"existing knowledge")
         self.assertFalse((self.home / ".agents/skills/loop-work").is_symlink())
 
+    def bind_task(self, entrypoint, provider):
+        opened = self.run_cli(entrypoint, "work", "open", "--kind", "explanation",
+                              "--title", "Check installed entrypoint", "--provider", provider,
+                              "--path", str(self.project))
+        self.assertEqual(opened.returncode, 0, opened.stderr)
+        task = json.loads(opened.stdout)["task"]
+        return self.run_cli(entrypoint, "harness", "on", "--provider", provider,
+                            "--session", task["session_id"], "--task", task["id"])
+
     def test_wrapper_retains_install_binding_after_cwd_changes_and_is_removed(self):
         managed = installer.install_links(self.home)
         adapter = self.home / ".agents/skills/loop-work/loop.py"
-        on = self.run_cli(adapter, "harness", "on", "--provider", "codex")
+        on = self.bind_task(adapter, "codex")
         self.assertEqual(on.returncode, 0, on.stderr)
         activation = json.loads(on.stdout)
         self.assertEqual(activation["entrypoint"], str(managed / "loop.py"))
@@ -130,7 +139,10 @@ class LinkInstallationTests(unittest.TestCase):
     def test_modified_project_block_prevents_partial_uninstall(self):
         managed = installer.install_links(target=self.project)
         path = self.project / "CLAUDE.md"
-        path.write_text(path.read_text().replace("only on explicit", "also without explicit"))
+        original = path.read_text()
+        modified = original.replace("binds only that task", "binds all later tasks")
+        self.assertNotEqual(modified, original)
+        path.write_text(modified)
         with self.assertRaisesRegex(LoopError, "Local edits"):
             installer.uninstall_links(target=self.project)
         self.assertTrue((managed / "loop.py").is_file())
@@ -218,7 +230,7 @@ class LinkInstallationTests(unittest.TestCase):
         self.assertEqual((managed / "runtime").resolve(), moved)
         for provider in ("claude", "codex"):
             self.assertIn("Updated canonical skill", (managed / "adapters" / provider / "SKILL.md").read_text())
-        recovered = self.run_cli(managed / "loop.py", "harness", "on", "--provider", "codex")
+        recovered = self.bind_task(managed / "loop.py", "codex")
         self.assertEqual(recovered.returncode, 0, recovered.stderr)
         installer.uninstall_links(self.home)
 
@@ -242,7 +254,7 @@ class LinkInstallationTests(unittest.TestCase):
             unrelated = self.project / discovery / "scripts/loop.py"
             unrelated.parent.mkdir(parents=True)
             unrelated.write_text("raise SystemExit('unrelated provider script must not execute')\n")
-            result = self.run_cli(self.project / discovery / "skills/loop-work/loop.py", "harness", "on", "--provider", provider)
+            result = self.bind_task(self.project / discovery / "skills/loop-work/loop.py", provider)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout)["entrypoint"], str(self.project / ".loop/loop.py"))
         with self.assertRaisesRegex(LoopError, "copied legacy installation"):
@@ -255,13 +267,37 @@ class LinkInstallationTests(unittest.TestCase):
     def test_make_passes_spaces_and_shell_syntax_as_literal_target_data(self):
         literal = self.base / "literal $(touch OWNED) `touch OTHER` ; ' \" target"
         literal.mkdir()
+        launchers = self.base / "isolated python launchers"
+        launchers.mkdir()
+        app = self.home / "Applications/Obsidian.app"
+        app.mkdir(parents=True)
+        launcher = launchers / "python3"
+        launcher.write_text("#!" + sys.executable + "\n" +
+            "import runpy, subprocess, sys\nfrom pathlib import Path\nfrom unittest.mock import patch\n" +
+            "sys.path.insert(0, " + repr(str(SOURCE)) + ")\n" +
+            "from scripts import setup_workspace\n" +
+            "original_run = subprocess.run\n" +
+            "def confined_run(argv, *args, **kwargs):\n" +
+            "    if isinstance(argv, (list, tuple)) and Path(argv[0]).name == 'brew':\n" +
+            "        raise AssertionError('This test must never invoke Homebrew')\n" +
+            "    return original_run(argv, *args, **kwargs)\n" +
+            "entry = sys.argv.pop(1)\nsys.argv[0] = entry\n" +
+            "with (patch.object(Path, 'home', return_value=Path(" + repr(str(self.home)) + ")),\n" +
+            "      patch.object(setup_workspace, 'find_obsidian', return_value=" + repr(str(app)) + "),\n" +
+            "      patch.object(subprocess, 'run', side_effect=confined_run)):\n" +
+            "    runpy.run_path(entry, run_name='__main__')\n")
+        launcher.chmod(0o700)
+        environment = {**os.environ, "PATH": str(launchers) + os.pathsep + os.environ.get("PATH", ""),
+                       "LOOP_KB_HOME": str(self.home / "test-knowledge")}
         for action in ("install", "install", "uninstall", "uninstall"):
             result = subprocess.run(["make", "TARGET=" + str(literal), action], cwd=SOURCE,
-                                    capture_output=True, text=True)
+                                    env=environment, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((SOURCE / "OWNED").exists())
         self.assertFalse((SOURCE / "OTHER").exists())
         self.assertFalse((literal / ".agents/skills/loop-work").is_symlink())
+        self.assertTrue((self.home / ".loop-work/vault/.obsidian").is_dir())
+        self.assertFalse((self.home / ".loop-work/data/knowledge.sqlite3").exists())
 
 
 if __name__ == "__main__":

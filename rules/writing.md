@@ -4,6 +4,18 @@ Write the conclusion first, then the evidence needed to use it. Match the user's
 language and technical level. Preserve precise terms, constraints and uncertainty;
 explain an unfamiliar term briefly when needed. Simplicity must not change the facts.
 
+## Korean vault records
+
+Write authored task titles, tracking summaries/findings and knowledge `summary`,
+`why`, `details`, `uncertainty` in Korean. Preserve proper names, API names and exact
+technical terms. An explicitly requested foreign-language deliverable remains in
+that language; keep its separate harness tracking summary in Korean.
+Never translate or alter original user input, quotations, evidence, code, commands,
+paths, hashes, references or machine JSON keys/enums. Existing English stored facts
+are not permission to invent a translated replacement. Do not reject a literal input
+or impose a Hangul-character validator: this is an authoring policy, not new authority
+or a content-quality shortcut. Assess conclusions against the actual source.
+
 ## Record shape
 
 | Record | Required content | Optional content |
@@ -37,6 +49,21 @@ language, medical assumptions, emojis, a fixed recap, or an unnecessary question
 every output. Explanations may be as long as the requested understanding requires;
 the bounded fields are navigation records, not a limit on the deliverable itself.
 
+## Progress and interim deliverables
+
+Progress updates identify a new result, blocker or next check condition. If a host
+requires an update during unchanged waiting, state that no new result is available
+and name the pending check; do not present the same unfinished state as new progress.
+A stage fraction describes the recorded workflow stage, not a test pass rate or an
+acceptance completion percentage unless those quantities were actually measured.
+
+For an interim evaluation, retain its cutoff date, source access limits, unresolved
+findings and historical verification units. Separate observations, reported facts and
+improvement hypotheses. Add later execution results in a dated section without
+replacing the earlier stop history; corrections identify their date, claim and evidence.
+Distinguish portable documents from unavailable local audit artifacts and past results
+from checks executed for the present task. Do not claim an unmeasured time or quality gain.
+
 ## Storage and maintenance
 
 SQLite and development state JSON are authoritative records. Markdown views are
@@ -54,6 +81,25 @@ The scripts reject blank/placeholder-only, oversized or multiline summaries, rep
 topic fields and duplicate evidence references. These checks prevent common bloat;
 the agent still checks factual accuracy and useful wording. A word blacklist cannot
 establish writing quality, and readability is not another review loop.
+
+## Obsidian reports
+
+Use the single `~/.loop-work/vault` as a derived document workspace. Group reports by
+human-readable project/task names plus stable IDs, with Korean current/interim/final
+labels and content-digest snapshots. Retain existing managed paths, including edited
+or missing paths; never create a fresh copy to bypass an ownership conflict or deletion.
+Indexes may link legacy files. Frozen path mappings do not rename on title changes. SQLite and
+development JSON remain authoritative. A report named final is not a completion gate;
+show blocked, stopped or unverified work as incomplete and preserve earlier failures.
+A later result supplements the dated interim record rather than erasing its cutoff.
+
+Preserve human-authored notes and existing `.obsidian` settings. Generated-file ownership
+and pins determine which reports may be refreshed; do not overwrite edited or unowned
+files. A vault edit alone never grants approval, completes QA or promotes a worker draft.
+Export errors are document-delivery problems: retain the committed task result and
+continue authorized work while reporting the failed view separately. Distinguish local
+`.loop` audit links from portable evidence; never imply that unavailable local logs
+were copied into a shareable report.
 
 ## References
 

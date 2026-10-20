@@ -39,12 +39,17 @@ class InstallFreshnessTests(ProjectTest):
     def test_bounded_policy_seal_detects_code_rules_and_skill_metadata(self):
         before = snapshot(self.root)
         for relative in ("loop_work/cli.py", "rules/work.md", "skills/loop-work/SKILL.md",
-                         "skills/loop-work/agents/openai.yaml"):
+                         "skills/loop-work/agents/openai.yaml", "rules/human.md", "loop_work/human_ui_assets/index.html",
+                         "loop_work/human_ui_assets/app.js", "loop_work/human_ui_assets/style.css"):
             with self.subTest(relative=relative):
                 seal = engine_digest()
                 self.mutate(relative)
                 self.assertNotEqual(engine_digest(), seal)
         seal = engine_digest()
+        legacy = self.source / "skills/loop-human/SKILL.md"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text("unowned historical skill")
+        self.assertEqual(engine_digest(), seal)
         (self.source / "unrelated.txt").write_text("not policy")
         self.assertEqual(engine_digest(), seal)
         self.assertEqual(snapshot(self.root), before)

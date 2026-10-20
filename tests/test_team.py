@@ -110,6 +110,26 @@ class TeamTests(ProjectTest):
             "id": key, "task_id": self.task_id, "kind": kind, "summary": "Keep the assigned interface compatible.",
             "original_input_ref": reference, "applies_to": "The current assigned interface", "supersedes": []}, control["control_version"])
 
+    def test_completed_team_validates_every_retained_assessment_before_reuse(self):
+        request = plan("alpha", "beta")
+        result = self.complete(request)
+        self.assertTrue(result["passed"], result)
+        ledger = copy.deepcopy(self.ledger())
+        budget = self.kb.get("worker-budget", self.task_id)
+        for member in ("alpha", "beta"):
+            record = self.team.assignment(member)
+            receipt = Path(record["assessment_ref"])
+            original = receipt.read_bytes()
+            receipt.write_bytes(original + b" ")
+            with patch("loop_work.providers.structured_call", side_effect=AssertionError("must not call")):
+                with self.assertRaisesRegex(LoopError, "assessment receipt changed"):
+                    self.team.run(request)
+                with self.assertRaisesRegex(LoopError, "assessment receipt changed"):
+                    self.team.run(request, recover="Inspected retained team evidence")
+            self.assertEqual(self.ledger(), ledger)
+            self.assertEqual(self.kb.get("worker-budget", self.task_id), budget)
+            receipt.write_bytes(original)
+
     def test_real_question_answer_followup_is_automatic_and_addressed(self):
         request = plan("alpha", "beta", "gamma")
         with patch.dict(os.environ, {"LOOP_TEAM_MODE": "exchange"}):
@@ -346,6 +366,58 @@ class TeamTests(ProjectTest):
         self.assertEqual(result["task_worker_calls"], 3)
         self.assertEqual(result["message_count"], 2)
 
+    def _stale_declared_scope_before_peer_delivery(self, ignored=False, after_accept=False):
+        request = plan('alpha', 'beta')
+        path = self.root / ('ignored-input.txt' if ignored else 'empty-input')
+        if ignored:
+            (self.root / '.git/info/exclude').write_text('ignored-input.txt\n')
+            request['members'][0]['assignment']['read_paths'].append('ignored-input.txt')
+        else:
+            path.mkdir()
+            request['members'][0]['assignment']['read_paths'].append('empty-input/')
+        original = self.team.accept
+        def mutate_before_accept(record, member, assignment_record):
+            accepted = original(record, member, assignment_record) if after_accept else None
+            if member == 'alpha' and assignment_record['status'] in ('waiting', 'done'):
+                if ignored:
+                    path.write_text('New ignored input')
+                else:
+                    path.rmdir()
+            return accepted if after_accept else original(record, member, assignment_record)
+        with patch.object(self.team, 'accept', side_effect=mutate_before_accept), patch.dict(os.environ, {'LOOP_TEAM_MODE': 'exchange'}):
+            result = self.complete(request)
+        self.assertFalse(result['passed'], result)
+        self.assertEqual(result['status'], 'blocked')
+        self.assertIsNone(self.team.assignment('beta'))
+        messages = self.ledger()['messages']
+        self.assertEqual(len(messages), 1 if after_accept else 0)
+        self.assertTrue(all(item['delivered_turn'] is None for item in messages))
+        self.assertIn('ignored/unobserved' if ignored else ('Team context changed' if after_accept else 'read scope'), result['error'])
+
+    def test_empty_read_directory_removal_prevents_peer_delivery(self):
+        self._stale_declared_scope_before_peer_delivery()
+
+    def test_absent_read_becoming_ignored_prevents_peer_delivery(self):
+        self._stale_declared_scope_before_peer_delivery(ignored=True)
+
+    def test_accepted_peer_question_rechecks_empty_directory_before_inbox(self):
+        self._stale_declared_scope_before_peer_delivery(after_accept=True)
+
+    def test_accepted_peer_question_rechecks_ignored_input_before_inbox(self):
+        self._stale_declared_scope_before_peer_delivery(ignored=True, after_accept=True)
+
+    def test_pending_candidate_reuse_checks_declared_directory_presence(self):
+        request = plan('alpha', 'beta')
+        folder = self.root / 'empty-input'; folder.mkdir()
+        request['members'][0]['assignment']['read_paths'].append('empty-input/')
+        result = self.team.run(request)
+        self.assertEqual(result['status'], 'awaiting_assessment')
+        folder.rmdir()
+        result = self.team.run(request)
+        self.assertEqual(result['status'], 'blocked')
+        self.assertIsNone(self.team.assignment('beta'))
+        self.assertEqual(self.ledger()['messages'], [])
+
     def test_stale_factual_message_does_not_reach_later_member(self):
         request = plan("alpha", "beta", "gamma")
         original = providers.structured_call
@@ -367,3 +439,64 @@ class TeamTests(ProjectTest):
         self.assertIn("peer answer or finding is stale", result["error"])
         self.assertIsNone(self.team.assignment("gamma"))
         self.assertEqual(result["task_worker_calls"], 2)
+
+    def test_completed_accepted_team_survives_binding_only_changes_without_new_calls(self):
+        from loop_work.harness import Harness
+        self.running()
+        harness=Harness(self.kb); task=self.kb.get('task',self.task_id)
+        harness.on('claude',task_id=self.task_id)
+        request=plan('alpha','beta',max_turns=2)
+        self.assertTrue(self.complete(request)['passed'])
+        ledger=copy.deepcopy(self.ledger()); budget=self.kb.get('worker-budget',self.task_id)
+        harness.off(task['session_id']); harness.on('claude',task_id=self.task_id)
+        with patch('loop_work.providers.structured_call',side_effect=AssertionError('Accepted work must not rerun')):
+            self.assertTrue(self.team.status(request['id'])['passed'])
+            result=self.team.run(request)
+        self.assertTrue(result['passed'],result)
+        self.assertEqual(result['turns'],2)
+        self.assertEqual(self.ledger(),ledger)
+        self.assertEqual(self.kb.get('worker-budget',self.task_id),budget)
+
+    def test_completed_team_reuse_after_rebinding_still_rejects_corrupt_accepted_pins(self):
+        from loop_work.harness import Harness
+        self.running()
+        harness=Harness(self.kb); task=self.kb.get('task',self.task_id)
+        harness.on('claude',task_id=self.task_id)
+        request=plan('alpha','beta',max_turns=2)
+        self.assertTrue(self.complete(request)['passed'])
+        ledger=copy.deepcopy(self.ledger()); budget=self.kb.get('worker-budget',self.task_id)
+        harness.off(task['session_id']); harness.on('claude',task_id=self.task_id)
+        receipt=Path(self.team.assignment('alpha')['assessment_ref'])
+        original=receipt.read_bytes(); receipt.write_bytes(original+b' ')
+        with patch('loop_work.providers.structured_call',side_effect=AssertionError('Must not invoke provider')):
+            with self.assertRaisesRegex(LoopError,'assessment receipt changed'):
+                self.team.status(request['id'])
+            with self.assertRaisesRegex(LoopError,'assessment receipt changed'):
+                self.team.run(request)
+        self.assertEqual(self.ledger(),ledger)
+        self.assertEqual(self.kb.get('worker-budget',self.task_id),budget)
+
+    def test_completed_rebound_team_preserves_pause_and_source_feedback_invalidation(self):
+        from loop_work.harness import Harness
+        self.running()
+        harness=Harness(self.kb); task=self.kb.get('task',self.task_id)
+        harness.on('claude',task_id=self.task_id)
+        request=plan('alpha','beta',max_turns=2)
+        self.assertTrue(self.complete(request)['passed'])
+        harness.off(task['session_id']); harness.on('claude',task_id=self.task_id)
+        ledger=copy.deepcopy(self.ledger()); budget=self.kb.get('worker-budget',self.task_id)
+        self.feedback('pause-completed',kind='pause')
+        with patch('loop_work.providers.structured_call',side_effect=AssertionError('Must not invoke provider')):
+            self.assertFalse(self.team.status(request['id'])['passed'])
+            with self.assertRaisesRegex(LoopError,'paused'):
+                self.team.run(request)
+        self.assertEqual(self.ledger(),ledger)
+        self.feedback('resume-completed',kind='resume')
+        self.assertFalse(self.team.status(request['id'])['passed'])
+        with patch('loop_work.providers.structured_call',side_effect=AssertionError('Turn cap must remain frozen')):
+            self.assertFalse(self.team.run(request)['passed'])
+        self.assertEqual(self.kb.get('worker-budget',self.task_id),budget)
+        self.assertEqual(self.ledger()['turns'],2)
+        # Separate source freshness remains required, regardless of binding.
+        (self.root/'value.py').write_text('VALUE = 7\n')
+        self.assertFalse(self.team.status(request['id'])['passed'])

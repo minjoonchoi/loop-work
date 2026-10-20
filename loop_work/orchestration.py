@@ -79,7 +79,17 @@ def _input_hash(path):
         raise LoopError(f"Feedback input file is unavailable: {path}") from exc
 
 
-def _capture_input(reference):
+def _capture_input(reference, db=None, task=None):
+    if reference.startswith("board-control:"):
+        key=reference.removeprefix("board-control:")
+        if db is None or task is None:
+            raise LoopError("Board control input requires its task transaction")
+        row=_record(db,"board-control",key)
+        text=row.get("original_text")
+        if row.get("task_id")!=task["id"] or row.get("session_id")!=task["session_id"] or not isinstance(text,str) or not text.strip():
+            raise LoopError("Board control original input does not belong to this task")
+        return {"kind":"board-control","record_id":key,"task_id":task["id"],"session_id":task["session_id"],
+                "sha256":digest(row),"original_text":text,"status":"captured"}
     candidate = reference.removeprefix("sandbox:")
     path = Path(candidate)
     if path.is_absolute():
@@ -109,7 +119,7 @@ def _public_feedback(knowledge, item):
             "record_ref": _ref(knowledge, FEEDBACK_KIND, item["id"])}
 
 
-def _worker_view(knowledge, task, records, enforce=True):
+def _worker_view(knowledge, task, records, enforce=True, human_records=()):
     records = sorted((x for x in records if x["task_id"] == task["id"]
                       and x["session_id"] == task["session_id"]), key=lambda x: x["seq"])
     superseded = {key for item in records for key in item["supersedes"]}
@@ -129,16 +139,23 @@ def _worker_view(knowledge, task, records, enforce=True):
     # input when the durable knowledge store is intentionally relocated.
     sealed = [{k: v for k, v in x.items() if k != "record_ref"} for x in feedback]
     substantive_sealed = [{k: v for k, v in x.items() if k != "record_ref"} for x in substantive]
+    from .human import public_requests
+    human = [item for item in public_requests(human_records, task["id"]) if not item["superseded_by"]]
+    pending_human = [item for item in human if item["status"] in ("pending", "declined")]
+    answered_human = [item for item in human if item["response"] is not None and item["status"] != "declined"]
+    human_seal = [{key: item[key] for key in ("id", "revision", "status", "response")} for item in human]
     value = {"schema_version": 1, **identity,
-             "revision": digest({**identity, "feedback": sealed, "scope_changes": scope_changes}),
-             "substantive_revision": digest({**identity, "feedback": substantive_sealed}),
-             "requires_worker": bool(substantive), "paused": paused, "scope_changed": scope_changed,
-             "blocked": paused or scope_changed or inputs_stale,
+             "revision": digest({**identity, "feedback": sealed, "scope_changes": scope_changes, "human": human_seal}),
+             "substantive_revision": digest({**identity, "feedback": substantive_sealed, "human": human_seal}),
+             "requires_worker": bool(substantive or answered_human), "paused": paused, "scope_changed": scope_changed,
+             "blocked": paused or scope_changed or inputs_stale or bool(pending_human),
              "block_reason": ("Scope changed; define a new task before dispatching work."
                               if scope_changed else "User paused this task; an explicit resume is required." if paused else
                               "Original feedback evidence changed or is unavailable; restore it or record a new superseding user input."
-                              if inputs_stale else None),
-             "feedback": feedback,
+                              if inputs_stale else "Await the actual human response; workers cannot answer pending human requests."
+                              if pending_human else None),
+             "human_requests": human, "needs_human": pending_human,
+             "human_responses": answered_human, "feedback": feedback,
              "feedback_history_ref": str(_folder(knowledge, task["session_id"]) / "feedback.json")}
     if enforce and _size(value) > MAX_CONTEXT_BYTES:
         raise LoopError("Effective feedback exceeds the 16 KiB worker context limit; explicitly reconcile and supersede it before dispatch")
@@ -159,7 +176,7 @@ def worker_context(knowledge, task_id, db=None):
             return worker_context(knowledge, task_id, connection)
     task = _record(db, "task", task_id)
     _record(db, "session", task["session_id"])
-    return _worker_view(knowledge, task, _records(db, FEEDBACK_KIND))
+    return _worker_view(knowledge, task, _records(db, FEEDBACK_KIND), human_records=_records(db, "human-request"))
 
 
 def _write_view(path, value):
@@ -181,7 +198,7 @@ class Orchestration:
     def worker_context(self, task_id, db=None):
         return worker_context(self.knowledge, task_id, db)
 
-    def feedback(self, session_id, payload, expected_version):
+    def feedback(self, session_id, payload, expected_version, guard=None):
         """Record an explicit user input; never modify a task goal or acceptance."""
         _valid_id(session_id, "session ID")
         if type(expected_version) is not int or expected_version < 0:
@@ -205,6 +222,8 @@ class Orchestration:
             db.execute("BEGIN IMMEDIATE")
             _record(db, "session", session_id)
             task = _record(db, "task", authored["task_id"])
+            if guard is not None:
+                guard(db)
             if task["session_id"] != session_id:
                 raise LoopError("Feedback task must belong to this session")
             control = _control(db, session_id)
@@ -225,13 +244,14 @@ class Orchestration:
                 item = {**{name: value for name, value in authored.items() if name != "id"},
                         "id": key, "feedback_id": authored["id"], "session_id": session_id,
                         "seq": control["control_version"] + 1, "basis": "user", "created_at": stamp,
-                        "original_input": _capture_input(authored["original_input_ref"])}
+                        "original_input": _capture_input(authored["original_input_ref"],db,task)}
                 control = {**control, "control_version": item["seq"], "updated_at": stamp}
                 self.knowledge.put(FEEDBACK_KIND, item, db)
                 self.knowledge.put(CONTROL_KIND, control, db)
                 reused = False
             records = [x for x in _records(db, FEEDBACK_KIND) if x["session_id"] == session_id]
-            view = _worker_view(self.knowledge, task, records, enforce=False)
+            view = _worker_view(self.knowledge, task, records, enforce=False,
+                                human_records=_records(db, "human-request"))
             # Export under the writer transaction, so a delayed exporter cannot
             # replace a newer feedback history with an older snapshot.
             self._export_feedback(session_id, records, control)
@@ -257,11 +277,13 @@ class Orchestration:
         value["record_ref"] = _ref(self.knowledge, "task", task["id"])
         return value
 
-    def _worker_preview(self, record):
+    def _worker_preview(self, record, retirement=None):
         request = record.get("request", {})
         value = {"id": record["id"], "task_id": record["task_id"], "assignment_id": request.get("id"),
                  "status": record.get("status"), "provider": record.get("provider"),
                  "record_ref": _ref(self.knowledge, "delegation", record["id"])}
+        if retirement is not None:
+            value["retirement"] = retirement
         summary = _small_text(record.get("summary"))
         if summary:
             value["summary"] = summary
@@ -288,8 +310,16 @@ class Orchestration:
             value["assessment"]["ref"] = value["record_ref"] + "#/assessment"
         if record.get("status") == "candidate":
             value["next"] = "Inspect the staged result and evidence; submit an internal accept/reject assessment. No changes are applied yet."
-        elif record.get("status") == "rejected":
-            value["next"] = "Retry the same assignment or team; the router selects a stronger eligible profile within the remaining budget."
+        elif retirement and retirement.get("valid"):
+            value["next"] = "This obligation has a valid retirement receipt; preserve its original failure history and continue remaining work."
+        elif record.get("status") in ("rejected", "blocked", "interrupted"):
+            try:
+                from .delegation import Delegation, PreflightKnowledge
+                response = Delegation(PreflightKnowledge(self.knowledge.home), record["task_id"], record["root"]).response(record)
+                value["retry"] = response["assignment"]["retry"]
+                value["next"] = response["next"]
+            except (LoopError, OSError, ValueError, KeyError) as exc:
+                value["next"] = "Inspect current setup/evidence before any retry: " + str(exc)
         return value
 
     def _current(self, task, locations, view):
@@ -366,21 +396,40 @@ class Orchestration:
             session = _record(db, "session", session_id)
             control = _control(db, session_id)
             tasks = [x for x in _records(db, "task") if x["session_id"] == session_id]
+            from .harness import activation_status
+            bound=session.get("harness",{}).get("task_id")
+            bound_task=next((x for x in tasks if x["id"]==bound),None)
+            binding=activation_status(session,bound_task)
+            if task_id is None and binding["task_id"]:
+                task_id=binding["task_id"]
             tasks.sort(key=lambda x: (x.get("phase") in ("completed", "aborted"), x["id"]))
             selected = next((x for x in tasks if x["id"] == task_id), None) if task_id else None
             if task_id and selected is None:
                 raise LoopError("Context task must belong to this session")
             records = [x for x in _records(db, FEEDBACK_KIND) if x["session_id"] == session_id]
+            human_records = [x for x in _records(db, "human-request") if x["session_id"] == session_id]
             locations = {x["id"]: x for x in _records(db, "location")}
             visible_ids = {task_id} if task_id else {x["id"] for x in tasks if x.get("phase") not in ("completed", "aborted")}
             workers = [x for x in _records(db, "delegation") if x["task_id"] in visible_ids]
             workers.sort(key=lambda x: (x.get("status") in ("candidate", "rejected", "running", "interrupted"),
                                         x.get("started_at", ""), x["id"]), reverse=True)
             task_views = [self._task_preview(x) for x in tasks]
-            worker_views = [self._worker_preview(x) for x in workers]
+            from .retirement import is_retired
+            retirement_views = {}
+            for worker in workers:
+                receipt = _record(db, "retirement", "retire-" + digest([worker["task_id"], worker["request"]["id"]])[:24], False)
+                if receipt is not None:
+                    info = {"receipt_ref": receipt["receipt_ref"], "replacements": receipt["replacements"]}
+                    try:
+                        info["valid"] = is_retired(self.knowledge, worker["task_id"], worker, db)
+                    except (LoopError, OSError, KeyError, ValueError) as exc:
+                        info.update(valid=False, error=_small_text(str(exc)))
+                    retirement_views[worker["id"]] = info
+            worker_views = [self._worker_preview(x, retirement_views.get(x["id"])) for x in workers]
+            from .human import public_requests
             relevant_tasks = [x for x in tasks if task_id is None or x["id"] == task_id]
             feedback_views = sorted([entry for task in relevant_tasks
-                                     for entry in _worker_view(self.knowledge, task, records, enforce=False)["feedback"]],
+                                     for entry in _worker_view(self.knowledge, task, records, enforce=False, human_records=human_records)["feedback"]],
                                     key=lambda x: x["seq"], reverse=True)
             directory_ids = sorted({key for task in tasks if task["id"] in visible_ids for key in task.get("locations", [])})
             directories = [{key: locations[location_id].get(key) for key in ("id", "project_id", "root")}
@@ -399,15 +448,17 @@ class Orchestration:
             capsule = {"schema_version": 1, "session_id": session_id, "provider": session["provider"],
                        "entrypoint": str(cli_entry), "rules_home": str(source / "rules"),
                        "knowledge_home": str(self.knowledge.home),
-                       "enabled": session.get("harness", {}).get("enabled", False),
+                       "enabled": binding["enabled"] and task_id==binding["task_id"], "scope":"task", "inputs":"related", "binding":{**binding,"enabled":binding["enabled"] and task_id==binding["task_id"]},
                        "control_version": control["control_version"], "task_id": task_id,
                        "tasks": task_views[:limit], "workers": worker_views[:limit],
                        "directories": directories[:limit], "feedback": feedback_views[:limit],
+                       "human_requests": [entry for task in relevant_tasks
+                                          for entry in public_requests(human_records, task["id"])][:limit],
                        "counts": {**{key: len(values) for key, values in indexes.items()}, "feedback": len(feedback_views)},
                        "refs": refs,
                        "next": "Select the relevant unfinished task from this session; use its references for scoped assignments."}
             if selected:
-                view = _worker_view(self.knowledge, selected, records, enforce=False)
+                view = _worker_view(self.knowledge, selected, records, enforce=False, human_records=human_records)
                 if _size(view) > MAX_CONTEXT_BYTES:
                     view = {**view, "blocked": True, "block_reason": "Effective feedback exceeds the worker context limit; reconcile it before dispatch."}
                 capsule["current"] = self._current(selected, locations, view)
@@ -418,11 +469,13 @@ class Orchestration:
                      "blocked": "Inspect the recorded blocker and recover only within existing authority.",
                      "completed": "Report the recorded result; refresh development evidence before claiming current completion.",
                      "aborted": "Report the stopped task; do not dispatch new work for it."}.get(selected.get("phase"), "Inspect the linked authoritative task state."))
-                pending = [worker for worker in workers if worker.get("status") in ("candidate", "rejected")]
+                pending = [worker for worker in workers if worker.get("status") in ("candidate", "rejected")
+                           and not retirement_views.get(worker["id"], {}).get("valid", False)]
                 if pending and not view["blocked"] and selected.get("phase") not in ("completed", "aborted", "blocked"):
                     capsule["next"] = ("Inspect candidate artifacts and submit assess with source-backed checks before applying work."
                                        if any(worker["status"] == "candidate" for worker in pending) else
-                                       "Retry the rejected assignment or team unchanged; only that assignment is escalated within its remaining budget.")
+                                       next((item.get("next", "Inspect current retry evidence.") for item in worker_views
+                                             if item["id"] == pending[0]["id"]), "Inspect current retry evidence."))
                 if selected.get("phase") == "completed":
                     current = capsule["current"]
                     stale = (view["blocked"] or current.get("completion", {}).get("freshness", "").startswith("stale")
@@ -432,8 +485,8 @@ class Orchestration:
                         capsule["next"] = "Report the prior result as historical; any required rework needs a new task or goal linked to this result."
             elif not tasks:
                 capsule["next"] = "Set the requested goal and create its task in this session."
-            if not capsule["enabled"]:
-                capsule["next"] = "Harness is disabled; do not automatically dispatch work."
+            if not capsule["enabled"] and (selected is None or selected.get("phase") not in ("completed","aborted")):
+                capsule["next"] = "This task is not actively bound; do not automatically dispatch or select another task."
             # Drop whole navigation entries, with counts and full-index references
             # retained.  No authored decision or evidence string is cut to fit.
             groups = ("tasks", "workers", "directories", "feedback")

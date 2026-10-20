@@ -5,19 +5,21 @@ analysis and results; keep detailed evidence in linked records.
 
 This is the single workflow for Claude Code and Codex. The main conversation handles
 the goal, user feedback, orchestration, evidence checks and reporting. Explicitly
-assigned CLI workers investigate, plan, draft and implement; the opposite
-provider to the implementation worker reviews. Follow `delegation.md` for every handoff. The user must
+assigned CLI workers investigate, plan, draft and implement; an independent fresh
+invocation reviews. Use the opposite provider when its CLI is installed; otherwise
+use the worker provider. Record this availability choice during plan-review and keep
+it fixed for the goal. Authentication, permission or execution failure never triggers
+a same-provider retry. Follow `delegation.md` for every handoff. The user must
 not have to feed source locations, missing dependencies, error explanations, or next
 steps one prompt at a time. Run the commands below yourself; do not hand the user a
 manual checklist to operate the loop.
 
-## Development inside an activated conversation
+## Development for one explicitly invoked task
 
-The loop-work skill explicitly enables the conversation once; `work.md` routes every
-later input. Within that enabled session, an ordinary request such as "로그인 기능을
-완성해 줘" starts this workflow. Do not require another skill prefix, operating
-prompt, request for tests/reviews or redundant permission to use the loop. Outside
-an activated session, task wording alone does not activate it.
+An explicit `$loop-work <prompt>` or `/loop-work <prompt>` enters this workflow for
+that task. Related corrections and continuation do not need another prefix. Ordinary
+unrelated requests do not activate it, even in a conversation with prior tasks.
+Completion or abort releases routing; preserve all QA gates and finite budgets.
 
 | User intent | Agent action |
 | --- | --- |
@@ -32,8 +34,8 @@ matching draft/ready goal from the conversation and stored state when identifiab
 Otherwise choose a meaningful safe goal ID yourself. Do not ask the user to supply
 IDs, JSON, file locations or script commands merely to operate the harness.
 
-Keep the same local `session_id` throughout this conversation, including after a goal
-completes. After every user input, worker result and compaction, load
+Keep the same local `session_id` and task ID throughout this task. Completion
+releases routing; a later explicit task never inherits activation automatically. After every user input, worker result and compaction, load
 `orchestration context SESSION_ID [--task TASK_ID]`. Follow specific references to
 relevant facts, decisions or failed evidence. Reuse unchanged facts/answers; delegate
 only missing topics and affected dependencies. Follow `context.md` for feedback and
@@ -45,6 +47,21 @@ A broad desired outcome starts discovery and preflight, not speculative code edi
 Derive the missing technical context and acceptance criteria. Ask only necessary
 human-owned decisions before start, following the policy below. Do not expand the
 product scope beyond the user's goal or wait for repeated "next" instructions.
+For a clear bounded change, put necessary source inspection and the implementation
+in one complete worker unit instead of adding a standalone analysis/plan deliverable.
+Keep actual tests, preflight review, independent implementation review and final
+fresh evidence. Before start, resolve every required preflight assignment; a blocked
+`goal_setting` assignment cannot be rerun after entering implementation. A new task
+or assignment ID must not be used to erase its history or reset budgets.
+
+For a setup-sensitive handoff, run `delegate GOAL --input FILE --check` before the
+actual delegate call. The check reports current setup failures without changes;
+it does not approve implementation or guarantee later freshness. Resolve exact
+scope/public API/settings/classpath/compiler-diagnostic gaps before spending a call.
+Check every prerequisite command's exit status: if `note` or validation fails, do
+not run its dependent delegate. Draft evidence belongs in discovery/contract, while
+execution notes require running phase. Keep parent inputs unchanged during a call;
+retain and recover stale results instead of silently resealing them.
 
 ## Roles and precedence
 
@@ -56,9 +73,9 @@ product scope beyond the user's goal or wait for repeated "next" instructions.
   only; never expand scope, redelegate, ask the user or start another loop.
 - `orchestrator` identifies the actual conversation; `implementer` identifies its
   implementation worker. Both can be Claude or Codex. The session belongs to the
-  orchestrator; the independent reviewer is opposite to the worker. Do not switch
+  orchestrator; the independent reviewer follows the recorded preflight selection. Do not switch
   either provider after freeze. Do not bypass vendor restrictions on nested CLI calls.
-- Python 3.10+, Git, Claude Code and Codex CLIs on macOS/Linux are required. Use
+- Python 3.10+, Git and at least the selected worker CLI on macOS/Linux are required. Use
   existing CLI authentication and permissions. Do not bypass permission systems.
 
 ## 1. Capture the target and discover context
@@ -73,11 +90,10 @@ Set `--orchestrator claude` inside Claude Code. The worker defaults to the same
 provider in ordinary use; an authorized alternative may be set before freeze. Test
 a read-only analysis assignment before start to verify the worker CLI.
 For a continuing goal, restore its orchestration capsule instead of initializing again.
-Pass the session ID from skill activation even on the first goal. `init` and
-`session open` can create inactive sessions for low-level use; they do not replace
-explicit skill activation. Keep the ID, absolute CLI entrypoint and knowledge home
+`init` creates the task/session before `harness on --task TASK_ID` binds it.
+`session open` remains available for inactive low-level use; it does not activate work. Keep the ID, absolute CLI entrypoint and knowledge home
 in handoffs. The agent performs these actions; the user supplies goals and unresolved
-human decisions. A completed goal does not turn off the session.
+human decisions. A completed or aborted goal releases task routing.
 
 1. Define observable target behavior, users, scope, exclusions, requirements and
    acceptance scenarios before judging the current implementation.
@@ -99,8 +115,12 @@ human decisions. A completed goal does not turn off the session.
    Record basis accurately: `user`, `repository-rule`, or `delegated`.
 6. Record explicit available profiles in `execution.routing`, or import them using
    `LOOP_ROUTING_PROFILE` during preflight. Configure suitable profiles for the worker
-   and opposite reviewer before freeze. Assignment demand chooses the cheapest eligible
+   and selected independent reviewer before freeze. Assignment demand chooses the cheapest eligible
    profile; higher initial demand needs evidence. No runtime model/effort fallback is used.
+
+Before freeze, state the coordinator-selected gate-attempt, worker-call and working-time
+budgets, their rationale and the exhaustion condition. Distinguish coordinator choices
+from user limits; do not ask for another approval when the choice is already delegated.
 
 ## 2. Resolve only human-owned uncertainty
 
@@ -134,7 +154,8 @@ python3 "$ENTRYPOINT" --knowledge-home "$KNOWLEDGE_HOME" --root "$PROJECT_ROOT" 
 python3 "$ENTRYPOINT" --knowledge-home "$KNOWLEDGE_HOME" --root "$PROJECT_ROOT" plan-review goal-id
 ```
 
-The live plan review invokes the opposite provider with the explicit review profile
+The live plan review selects the opposite installed CLI, or a fresh invocation of
+the worker provider when it is absent, with the explicit review profile
 selected under `routing.md`, which also checks that required
 CLI flags/authentication work. Review must cover every acceptance criterion and
 find no unresolved questions or findings. If it fails, read the artifact, investigate
@@ -171,7 +192,11 @@ Repeat until the goal is complete:
    The command stages a candidate. Inspect its goal contribution and concrete evidence,
    then call `assess goal-id --input ASSESSMENT` internally. Accept to apply/release it;
    reject an incorrect or harmful result and rerun the same assignment/team with a
-   stronger allowed profile within the existing budgets. Do not ask the user to approve
+   stronger allowed profile within the existing budgets for worker-output quality failure.
+   For v2 contract/fixture failures, repair the same work unit with a linked standalone
+   request revision on the same profile; teams support revision 1 only. Retain cumulative
+   corrections and consumed attempts. Root-owned checks remain pending in worker output,
+   then require accepted external evidence; do not assign execution to read-only workers. Do not ask the user to approve
    candidates or add an obligatory model judge. Continue accepted team turns with the
    same plan; worker `done` is not milestone success. Setup, permission and changed-input
    blockers do not justify model escalation.
@@ -186,8 +211,8 @@ Repeat until the goal is complete:
 
    Use `decision` or `replan` for choices/tactical replanning within the frozen
    target. Notes do not authorize scope, test-command, rule or business-rule changes.
-5. Run the next checkpoint. The script runs real commands, then a fresh opposite-
-   provider review. Read the report; it supplies the next corrective work.
+5. Run the next checkpoint. The script runs real commands, then a fresh independent
+   review using the recorded provider. Read the report; it supplies the next corrective work.
 
    ```sh
    python3 "$ENTRYPOINT" --knowledge-home "$KNOWLEDGE_HOME" --root "$PROJECT_ROOT" checkpoint goal-id --milestone M1
@@ -217,14 +242,23 @@ the exact recovery condition. New requirements start a new preflight goal.
 - For context loss, reopen the same provider and run
   `orchestration context SESSION_ID --task TASK_ID`; continue
   from persisted milestones, findings and notes without asking the user to repeat them.
-  Recover `session_id` too and use it for later goals in this same conversation.
+  Recover `session_id` too and retain it for this identified task; a later new
+  task needs an explicit skill prompt and its own binding.
 - For an interrupted gate, inspect logs, call `checkpoint`/`finish` to detect the
   interruption if necessary, then `resume`. Consumed attempts stay consumed.
-- `block --reason` records an unavoidable obstacle. `abort --reason` preserves all
+- `block GOAL --input FILE` requires typed version-1 blocker evidence (operations.md).
+  Reason-only public blocking is rejected. Check actual task calls/time and unfinished
+  gate budgets: exhaustion of one assignment does not exhaust the task. Explicit user
+  pause still requires recorded pause feedback. `abort --reason` preserves all
   files and evidence and releases the working tree for another goal. Neither is success.
 - A user-requested pause follows `entry.md`'s pause recipe. Preserve the recorded
   boundary; a progress question, retry recommendation or skill reactivation is not
   authorization to resume paused work.
+- Budget exhaustion is not a retryable interruption. If the user requests further
+  repair, preserve the exhausted goal and create a new preflight goal under the same
+  session. Link the predecessor ID, its last failed gate and unresolved acceptance;
+  record the new budget and who selected it. Never reset consumed attempts, silently
+  replace failed evidence, or interpret a status question as a new execution request.
 - Give brief progress updates during execution. Finish with achieved behavior,
   verification evidence, delivery location and concrete remaining limitations.
 
@@ -236,3 +270,11 @@ cannot keep a hostile agent/user from editing state or bypassing the CLI. Use th
 host tool's permissions for containment. Do not promise that every arbitrary goal
 can always complete: denied permissions, unavailable services and finite budgets
 must produce honest, recoverable failure.
+
+
+Rejected obligations may be replaced through `retire GOAL --input FILE`, preserving
+the failed status and audit history. Require accepted same-task replacements, complete
+criterion coverage and current contribution/evidence pins. Stale retirement restores
+the barrier; refresh by appending a new validated receipt. Never use retirement to skip
+latest substantive feedback consumption, milestone criteria or fresh final gates.
+No rule here guarantees host-hook or daemon-driven automatic resumption.

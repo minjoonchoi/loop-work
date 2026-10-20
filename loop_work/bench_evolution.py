@@ -49,6 +49,12 @@ def profile(spec):
     result = {k: spec[k] for k in PROFILE_FIELDS}
     # Historical manifests retain their original profile and sealed reports.
     # Explicit routing is a new experimental setting, never a retroactive edit.
+    if 'activation_protocol' in spec:
+        result['activation_protocol'] = spec['activation_protocol']
+    if 'planning_protocol' in spec:
+        result['planning_protocol'] = spec['planning_protocol']
+    if 'review_policy' in spec:
+        result['review_policy'] = spec['review_policy']
     if 'routing' in spec:
         from .bench_transport import validate_routing
         result['routing'] = validate_routing(spec['routing'], spec['models'], spec['efforts'])

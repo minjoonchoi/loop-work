@@ -70,7 +70,7 @@ def next_action(state, contract):
                 "for the next milestone and repairs, inspect returned deliverables, then call checkpoint. Repeat without asking the user. "
                 "Use note to persist evidence-backed discoveries/decisions; do not change the frozen target or rules.")}
         return {"action": "finish", "instruction": (
-            "Run finish for fresh full acceptance/regression checks and cross-provider review. Repair failures and repeat "
+            "Run finish for fresh full acceptance/regression checks and fresh independent review using the pinned provider selection. Repair failures and repeat "
             "within the budget. Only a successful finish permits reporting completion.")}
     if phase == "blocked":
         return {"action": "recover" if state.get("retryable") else "report_blocked",
@@ -92,7 +92,7 @@ def packet(root, goal_dir, state_dir, state, contract, discovery, session_contex
         "invariants": [
             "A target is independent of the current code maturity.",
             "After start, no user questions, scope reduction, rule edits or acceptance weakening.",
-            "Discover -> implement -> test -> opposite-provider review -> repair -> refresh context -> repeat.",
+            "Discover -> implement -> test -> independent review -> repair -> refresh context -> repeat.",
             "Tests alone and an agent saying done are not completion evidence.",
         ],
     }

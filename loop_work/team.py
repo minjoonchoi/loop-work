@@ -30,7 +30,11 @@ class Team:
 
     def save(self, record):
         record["updated_at"] = now()
-        self.knowledge.put("team", record)
+        with self.knowledge.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if "binding_generation" in record and record.get("status") not in ("blocked","failed","interrupted"):
+                self.worker.control({"binding_generation":record["binding_generation"]},db=db)
+            self.knowledge.put("team", record,db)
         # SQLite is authoritative; this complete ledger is a repairable artifact.
         write_json(Path(record["artifact"]), record)
 
@@ -40,15 +44,48 @@ class Team:
             raise LoopError("A team is bound to its original working location")
         return record
 
+    def _accepted_completion(self, record):
+        """A completed ledger is reusable only with every real accepted member."""
+        if record.get("status")!="done" or record.get("inflight"):
+            return False
+        expected={row["assignment"]["id"]:row["assignment"] for row in record["plan"]["members"]}
+        if set(record["members"])!=set(expected) or not expected:
+            raise LoopError("Completed team membership does not match its retained plan")
+        if any(member.get("status")!="done" for member in record["members"].values()):
+            return False
+        if any(item.get("kind")=="question" and not item.get("answered_by")
+               and item.get("epoch",0)==record.get("epoch",0) for item in record["messages"]):
+            return False
+        for name,member in record["members"].items():
+            assignment=self.assignment(name)
+            if (not assignment or assignment.get("status")!="done" or assignment.get("team_id")!=record["team_id"]
+                    or assignment.get("request")!=expected[name] or assignment.get("result")!=member.get("result")
+                    or assignment.get("team_turn")!=member.get("last_turn")):
+                raise LoopError("Completed team lacks its accepted member evidence: "+name)
+            self.worker.validate_retained_evidence(assignment)
+        return True
+
     def status(self, team_id):
         record = self.load(team_id)
+        accepted=self._accepted_completion(record)
         write_json(Path(record["artifact"]), record)
-        current = self.worker.observation()["digest"]
+        observed=self.worker.observation()
+        current = observed["digest"]
         from .orchestration import worker_context
         control = worker_context(self.knowledge, self.task_id)
         parent_current = digest(self.worker.parent()[1:]) == record["parent_seal"]
-        current_evidence = (current == record["source_revision"] and parent_current
+        scope_error=None
+        try:
+            scope_current=not any(self.worker._read_scope_changed(assignment,observed)
+                for name,member in record["members"].items() if member.get("status") in ("done","waiting")
+                for assignment in [self.assignment(name)] if assignment is not None)
+        except (LoopError,OSError,ValueError) as exc:
+            scope_current=False
+            scope_error=str(exc)
+        current_evidence = (current == record["source_revision"] and parent_current and scope_current
                             and control["revision"] == record["feedback_revision"] and not control["blocked"])
+        if record["status"]=="done" and not accepted:
+            current_evidence=False
         members = [{"id": key, **{name: value.get(name) for name in ("status", "summary", "turns", "result")}}
                    for key, value in record["members"].items()]
         pending = [item for item in record["messages"] if item["delivered_turn"] is None
@@ -68,7 +105,7 @@ class Team:
                         break
         return {"passed": record["status"] == "done" and current_evidence,
                 "team_id": record["team_id"], "task_id": self.task_id, "status": record["status"],
-                "summary": record["summary"], "error": (record.get("error") or "")[:280] or None,
+                "summary": record["summary"], "error": (record.get("error") or scope_error or "")[:280] or None,
                 "evidence_current": current_evidence, "turns": record["turns"],
                 "max_turns": record["plan"]["max_turns"], "task_worker_calls": budget["calls"],
                 "members": members[:5], "member_count": len(members),
@@ -96,6 +133,8 @@ class Team:
             if not isinstance(row, dict) or set(row) != {"assignment"}:
                 raise LoopError("Each team member contains exactly one assignment")
             request = row["assignment"]
+            if request.get("schema_version") == 2 and request.get("request_revision") != 1:
+                raise LoopError("Team v2 supports immutable revision 1 only; keep this team blocked and preserve its unit history. Existing team work cannot silently migrate to standalone contract repair.")
             validate_request(request, self.root, state["phase"], task["kind"] == "development", rule_paths)
             if request["id"] in members:
                 raise LoopError("Team member assignment IDs must be unique")
@@ -159,7 +198,16 @@ class Team:
 
     def packet(self, record, assignments, member, turn, control):
         inbox = self.inbox(record, member)
+        observed = self.worker.observation()
         for item in inbox:
+            sender = self.assignment(item["from"])
+            if not sender:
+                raise LoopError("Peer delivery lacks its accepted assignment evidence")
+            self.worker.validate_retained_evidence(sender)
+            self.worker.candidate(sender)
+            self.worker.assessment_receipt(sender)
+            if self.worker._read_scope_changed(sender, observed):
+                raise LoopError("A peer declared read scope or accepted output is stale before delivery")
             if item["kind"] != "question" and (item["source_revision"] != record["source_revision"]
                     or item["parent_seal"] != record["parent_seal"]
                     or item["feedback_revision"] != control["revision"]):
@@ -184,6 +232,7 @@ class Team:
         if (assignment_record.get("team_id") != record["team_id"]
                 or assignment_record.get("team_turn") != inflight["turn"]):
             raise LoopError("The recovered worker does not match the reserved team turn")
+        self.worker.validate_retained_evidence(assignment_record)
         state = record["members"][member]
         if assignment_record["status"] == "candidate":
             raise LoopError("The main session must assess the candidate before any team result or message is accepted")
@@ -198,14 +247,19 @@ class Team:
             record.update(status="running", error=None)
             self.save(record)
             return
+        if assignment_record["status"] in ("done", "waiting"):
+            observed = self.worker.observation()
+            if self.worker._read_scope_changed(assignment_record, observed):
+                raise LoopError("Worker declared read scope or accepted output changed before team delivery")
         state.update(status=assignment_record["status"], summary=assignment_record["summary"],
                      result=assignment_record.get("result"), after=assignment_record.get("after"),
                      last_turn=assignment_record["team_turn"])
         if assignment_record["status"] in ("done", "waiting"):
-            if (assignment_record["after"] != self.worker.observation()["digest"]
+            if (assignment_record["after"] != observed["digest"]
                     or assignment_record["parent_seal"] != digest(self.worker.parent()[1:])):
                 raise LoopError("Worker evidence changed before its team result could be accepted")
-            control = self.worker.control()
+            dispatch=read_json(Path(assignment_record["directory"])/"dispatch.json")
+            control = self.worker.control(dispatch["control"])
             if assignment_record["feedback_revision"] != control["revision"]:
                 raise LoopError("User feedback changed before the team accepted this turn")
             value = self.worker.candidate(assignment_record)
@@ -240,6 +294,12 @@ class Team:
         key = self.key(plan.get("id"))
         with locked(self.knowledge.home / "team-locks" / key):
             task, state, goal, discovery, assignments = self.validate(plan)
+            # Validate every retained member before freshness, reuse or recovery
+            # can return a completed team or archive an earlier attempt.
+            for name in assignments:
+                retained = self.assignment(name)
+                if retained is not None:
+                    self.worker.validate_retained_evidence(retained)
             control = self.worker.control()
             parent_seal = digest([state, goal, discovery])
             record = self.knowledge.get("team", key, required=False)
@@ -253,7 +313,7 @@ class Team:
                 record = {"id": key, "team_id": plan["id"], "task_id": self.task_id,
                           "location_id": self.worker.location["id"], "root": str(self.root), "plan": plan,
                           "goal_seal": digest(goal), "parent_seal": parent_seal,
-                          "feedback_revision": control["revision"], "source_revision": self.worker.observation()["digest"],
+                          "feedback_revision": control["revision"], "binding_generation":control.get("binding_generation"), "source_revision": self.worker.observation()["digest"],
                           "status": "running", "summary": "The bounded team is executing its assignments.", "error": None,
                           "turns": 0, "epoch": 0, "inflight": None, "messages": [], "artifact": str(artifact), "created_at": now(),
                           "members": {name: {"status": "pending", "summary": "This assignment has not run.", "turns": 0,
@@ -266,9 +326,13 @@ class Team:
                             and previous.get("team_turn") == inflight["turn"])
                 if matching and previous["status"] == "candidate":
                     self.worker.candidate(previous)
-                    if (previous["before"] == self.worker.observation()["digest"]
+                    observed = self.worker.observation()
+                    if (not self.worker._read_scope_changed(previous, observed)
+                            and previous["before"] == observed["digest"]
                             and previous["parent_seal"] == parent_seal
                             and previous["feedback_revision"] == control["revision"]):
+                        dispatch=read_json(Path(previous["directory"])/"dispatch.json")
+                        self.worker.control(dispatch["control"])
                         record.update(status="awaiting_assessment", summary="The main session must assess the current candidate before team work continues.")
                         self.save(record)
                         return self.status(plan["id"])
@@ -300,9 +364,20 @@ class Team:
                     record["inflight"] = None
                     record["recovery"] = recover
                     self.save(record)
-            current_source = self.worker.observation()["digest"]
-            changed_context = (record["parent_seal"] != parent_seal or record["source_revision"] != current_source
-                               or record["feedback_revision"] != control["revision"])
+            observed = self.worker.observation()
+            current_source = observed["digest"]
+            try:
+                scope_changed = any(self.worker._read_scope_changed(assignment, observed)
+                                    for name, member_state in record["members"].items()
+                                    if member_state["status"] in ("done", "waiting")
+                                    for assignment in [self.assignment(name)] if assignment is not None)
+            except (LoopError, OSError, ValueError) as exc:
+                self.block(record, exc)
+                return self.status(plan["id"])
+            accepted_completion=self._accepted_completion(record)
+            changed_context = (scope_changed or record["parent_seal"] != parent_seal or record["source_revision"] != current_source
+                               or record["feedback_revision"] != control["revision"]
+                               or not accepted_completion and "binding_generation" in record and record["binding_generation"]!=control.get("binding_generation"))
             if record["status"] == "done" and not changed_context:
                 return self.status(plan["id"])
             if changed_context:
@@ -312,7 +387,7 @@ class Team:
                 # Refresh the same immutable assignments. All old messages and
                 # results remain historical; no turn or call budget is reset.
                 record["epoch"] = record.get("epoch", 0) + 1
-                record.update(parent_seal=parent_seal, source_revision=current_source, feedback_revision=control["revision"])
+                record.update(parent_seal=parent_seal, source_revision=current_source, feedback_revision=control["revision"],binding_generation=control.get("binding_generation"))
                 for member_state in record["members"].values():
                     member_state["status"] = "pending"
                 self.save(record)

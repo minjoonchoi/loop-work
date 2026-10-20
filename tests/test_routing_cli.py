@@ -37,7 +37,7 @@ class RoutingIntegrationTests(ProjectTest):
         write_json(self.engine.goal_dir / "contract.json", contract)
         self.task_id = self.engine.refresh()["work_id"]
         self.session_id = self.state()["session_id"]
-        Harness(self.kb).on("claude", self.session_id)
+        Harness(self.kb).on("claude", self.session_id, self.task_id)
 
     def cli(self, *args, entry=None, root=None, code=0):
         result = subprocess.run([sys.executable, str(entry or SOURCE / "scripts/loop.py"),
@@ -113,10 +113,30 @@ class RoutingIntegrationTests(ProjectTest):
         entry = self.root / ".loop/loop.py"
         work, task, root = self.common_task()
         work.start(task)
+        inactive = self.cli("orchestration", "context", self.session_id, "--task", task, entry=entry, root=root)
+        self.assertFalse(inactive["enabled"])
+        self.assertFalse(inactive["binding"]["enabled"])
+        self.assertEqual(inactive["task_id"], task)
+        self.assertEqual(inactive["binding"]["task_id"], self.task_id)
+        self.assertEqual(Harness(self.kb).status(self.session_id)["task_id"], self.task_id)
+        self.assertIn("do not automatically dispatch", inactive["next"])
+        self.cli("harness", "off", self.session_id, entry=entry, root=root)
+        bound = self.cli("harness", "on", "--provider", "claude", "--session", self.session_id,
+                         "--task", task, entry=entry, root=root)
+        self.assertTrue(bound["enabled"])
+        self.assertEqual(bound["task_id"], task)
+        self.assertEqual(bound["session_id"], self.session_id)
+        self.assertEqual(bound["provider"], "claude")
+        self.assertEqual(bound["scope"], "task")
+        self.assertEqual(bound["inputs"], "related")
         staged = self.cli("work", "delegate", task, "--path", root,
                           "--input", self.input("common-request", self.request(goal="C1")), entry=entry, root=root, code=1)
         capsule = self.cli("orchestration", "context", self.session_id, "--task", task, entry=entry, root=root)
         self.assertLessEqual(len(json.dumps(capsule, ensure_ascii=False, sort_keys=True, indent=2).encode()), MAX_CONTEXT_BYTES)
+        self.assertTrue(capsule["enabled"])
+        self.assertTrue(capsule["binding"]["enabled"])
+        self.assertEqual(capsule["binding"]["task_id"], task)
+        self.assertEqual(capsule["workers"][0]["provider"], "codex")
         self.assertEqual(capsule["workers"][0]["candidate_id"], staged["assignment"]["candidate_id"])
         self.assertEqual(capsule["workers"][0]["profile"]["effort"], "low")
         self.assertNotIn("outputs", capsule["workers"][0])

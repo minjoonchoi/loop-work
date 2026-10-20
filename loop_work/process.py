@@ -8,22 +8,57 @@ import signal
 import subprocess
 import time
 
+from .storage import LoopError
 
-def execute(argv, cwd, log_dir, timeout, prompt=None, env_overrides=None, kill_tree=False):
+
+class Cancelled(LoopError):
+    """A task control interrupted execution; not a model-quality rejection."""
+
+
+def execute(argv, cwd, log_dir, timeout, prompt=None, env_overrides=None, kill_tree=False, cancel=None):
     log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     env = dict(os.environ, CI="true", GIT_TERMINAL_PROMPT="0", PIP_NO_INPUT="1")
+    # Checks importing local Python modules must not create new source inventory
+    # entries. Preserve an explicit host setting and per-call overrides.
+    env.setdefault("PYTHONDONTWRITEBYTECODE", "1")
     env.update(env_overrides or {})
     result = {"argv": argv, "exit_code": None, "timed_out": False,
-              "stdout": str(log_dir / "stdout.log"), "stderr": str(log_dir / "stderr.log")}
+              "cancelled": False, "stdout": str(log_dir / "stdout.log"), "stderr": str(log_dir / "stderr.log")}
     with (log_dir / "stdout.log").open("wb") as out, (log_dir / "stderr.log").open("wb") as err:
         try:
+            reason=cancel() if cancel is not None else None
+            if reason:
+                result.update(cancelled=True,cancel_reason=str(reason),duration_seconds=round(time.monotonic()-started,3))
+                return result
             process = subprocess.Popen(argv, cwd=cwd, env=env, start_new_session=True,
                                        stdin=subprocess.PIPE if prompt is not None else subprocess.DEVNULL,
                                        stdout=out, stderr=err)
             try:
-                process.communicate(prompt.encode() if prompt is not None else None, timeout=timeout)
+                payload=prompt.encode() if prompt is not None else None
+                if cancel is None:
+                    process.communicate(payload,timeout=timeout)
+                else:
+                    deadline=time.monotonic()+timeout
+                    while True:
+                        reason=cancel()
+                        if reason:
+                            result.update(cancelled=True,cancel_reason=str(reason))
+                            terminate(process,True)
+                            break
+                        remaining=deadline-time.monotonic()
+                        if remaining<=0:
+                            raise subprocess.TimeoutExpired(argv,timeout)
+                        try:
+                            process.communicate(payload,timeout=min(0.5,remaining))
+                            reason=cancel()
+                            if reason:
+                                result.update(cancelled=True,cancel_reason=str(reason))
+                                terminate(process,True)
+                            break
+                        except subprocess.TimeoutExpired:
+                            payload=None
             except subprocess.TimeoutExpired:
                 result["timed_out"] = True
                 terminate(process, kill_tree)

@@ -15,10 +15,17 @@
 
 - Complete a vertical behavior, including integration and its error cases.
 - Run its acceptance commands and all declared regression commands.
-- Opposite-provider review inspects source and test strength as well as exit codes.
+- Independent review under the recorded provider selection inspects source and test strength as well as exit codes.
 - All findings block progress, including minor findings; fix them instead of
   changing their severity or suppressing a test.
+- For a correctness finding, connect the repair to a regression that reproduces the
+  affected semantic boundary. When behavior depends on a framework, registration API
+  or reference resolver, compare with its actual native behavior or original object,
+  rather than assuming a string shape, error code or mutation source. Separate fixture
+  mistakes and framework lifecycle changes from defects in the collected behavior.
 - Review output covers every requested acceptance ID exactly once and cites evidence.
+  Report each prior finding as resolved or unresolved with current evidence; a larger
+  test count alone does not establish that the finding is fixed.
 - A failed/missing/malformed/denied/timed-out review never counts as a pass.
 
 ## Final

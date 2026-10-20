@@ -244,3 +244,90 @@ def validate_splits(assignments, goal, phase):
         if signature in signatures:
             raise LoopError("Duplicate assignment contribution; combine the work instead of splitting it again")
         signatures.add(signature)
+
+
+def retry_availability(policy, provider, current_profile_id, attempts, calls, max_calls,
+                       remaining_seconds, origin='unknown', strategy=None, requires_recovery=False):
+    """Shared new-call limits; this does not authorize evidence reuse or recovery.
+
+    Unknown legacy rejection origins retain the version-one escalation rule.
+    Counts and deadlines belong to the caller's immutable logical work unit.
+    """
+    import math
+    if (type(requires_recovery) is not bool
+            or any(type(n) is not int or n < 0 for n in (attempts, calls, max_calls))
+            or type(remaining_seconds) not in (int, float) or not math.isfinite(remaining_seconds)):
+        raise LoopError('Invalid retry budget observation')
+    if origin not in ('unknown', 'worker_output', 'assignment_input', 'orchestrator_fixture',
+                       'provider_execution', 'evidence_staleness'):
+        raise LoopError('Unsupported rejection origin')
+    result = {'can_retry_same_profile': False, 'can_escalate': False,
+              'attempts_remaining': max(0, 3 - attempts),
+              'calls_remaining': max(0, max_calls - calls),
+              'time_remaining': max(0, remaining_seconds),
+              'stop_reason': None, 'next_profile': None, 'requires_recovery': requires_recovery}
+    for exhausted, reason in ((attempts >= 3, 'attempt_cap'), (calls >= max_calls, 'call_cap'),
+                              (remaining_seconds <= 0, 'time_budget')):
+        if exhausted:
+            result['stop_reason'] = reason
+            return result
+    same = ((origin in ('assignment_input', 'orchestrator_fixture') and strategy == 'repair_contract_same_profile')
+            or (origin in ('provider_execution', 'evidence_staleness') and strategy == 'retry_same_profile'))
+    if same or requires_recovery:
+        validated = validate_policy(policy)
+        current = next((p for p in _provider_profiles(validated, provider) if p['id'] == current_profile_id), None)
+        if current is None:
+            raise LoopError('The prior worker profile is not in the frozen provider policy')
+        result.update(can_retry_same_profile=True, next_profile=current)
+    elif strategy == 'blocked':
+        result['stop_reason'] = 'blocked_by_strategy'
+    elif (origin == 'worker_output' and strategy == 'escalate') or (origin == 'unknown' and strategy is None):
+        try:
+            result['next_profile'] = escalate_profile(policy, provider, current_profile_id)
+            result['can_escalate'] = True
+        except LoopError as exc:
+            # Validate configuration separately: only a valid exhausted catalog
+            # is a ceiling; malformed policies remain genuine setup errors.
+            validated = validate_policy(policy)
+            if not any(p['id'] == current_profile_id for p in _provider_profiles(validated, provider)):
+                raise
+            result.update(stop_reason='profile_ceiling', error=str(exc))
+    else:
+        raise LoopError('Unsupported rejection origin/strategy combination')
+    return result
+
+
+def review_demand(criterion_ids, changed_paths, relevant_records, contract_ref):
+    """Version-one conservative review policy; scope counts are observations.
+
+    Preserve all recorded high dimensions. No empirical model capability or
+    optimal file-count threshold is inferred from these descriptive features.
+    """
+    dimensions = ('complexity', 'risk', 'uncertainty')
+    # Revision history remains demand evidence even after an input correction.
+    demands = []
+    for record in relevant_records:
+        demands.append(record.get('request', {}).get('planning', {}))
+        demands.extend(item.get('request', {}).get('planning', {}) for item in record.get('history', []))
+    high = {d: any(planning.get(d) == 'high' for planning in demands) for d in dimensions}
+    evidence = [str(contract_ref),
+                f'review scope: {len(criterion_ids)} criteria and {len(changed_paths)} changed files']
+    for record in relevant_records:
+        historical = [record, *record.get('history', [])]
+        if any(item.get('request', {}).get('planning', {}).get(d) == 'high'
+               for item in historical for d in dimensions):
+            current_high = any(record.get('request', {}).get('planning', {}).get(d) == 'high' for d in dimensions)
+            evidence.append('delegation:' + record['id'] + ('#/request/planning' if current_high else '#/history'))
+            if len(evidence) == 5:
+                break
+    planning = {'goal_criteria': list(criterion_ids),
+                'rationale': 'Independent review checks accepted criteria against source and verification evidence.',
+                'verification': 'Cover every selected criterion, inspect real behavior and report all findings.',
+                'complexity': 'high' if high['complexity'] else 'medium',
+                'risk': 'high' if high['risk'] else 'low',
+                'uncertainty': 'high' if high['uncertainty'] else 'low', 'evidence': evidence}
+    return {'planning': planning, 'scope_features': {
+        'version': 1, 'file_count': len(set(changed_paths)), 'criterion_count': len(criterion_ids),
+        'languages': sorted({Path(p).suffix.lower() or '(none)' for p in changed_paths}),
+        'retention_rule': 'retain_high_in_any_dimension',
+        'mapping': 'medium_review_floor_with_recorded_high_retention'}}

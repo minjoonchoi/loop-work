@@ -58,8 +58,9 @@ Do not start all work on the largest model or highest effort. A small task norma
 starts on the least expensive eligible profile; a consequential task can justify a
 higher starting requirement without first producing a knowingly inadequate result.
 
-Development's independent reviewer remains on the opposite provider with an explicit,
-suitable profile. Its demand is medium by default; recorded high risk or uncertainty
+Development's independent reviewer uses the opposite provider if its CLI is installed;
+otherwise it uses a fresh invocation of the worker provider. Record and retain the
+preflight selection under `workflow.md`, with an explicit suitable profile. Its demand is medium by default; recorded high complexity, risk or uncertainty from current and historical revisions
 with concrete assignment evidence raises it to high. File or criterion counts alone
 do not justify that increase. Select the least expensive eligible review profile;
 missing capability blocks review. Review requirements are not lowered to match a cheap worker.
@@ -79,7 +80,7 @@ the whole candidate: proposed edits, findings, outputs and peer messages cannot 
 working facts or prerequisite results. Retain its audit evidence and pass only the
 bounded failure reason to the next attempt.
 
-After a recorded quality rejection, rerun the same assignment/team. The runtime picks
+After a recorded legacy or typed worker-output quality rejection, rerun the same assignment/team. The runtime picks
 the least expensive allowed profile with strictly higher capability and a different
 model or effort, on the same provider. For a recognized effort order, a higher capability
 rank on the same model cannot lower effort, and escalation must increase it. The known
@@ -96,3 +97,22 @@ a missing permission, silently broaden the goal, or ask new questions after work
 A model's claim that an input is missing still needs checking. Reject a disproven claim
 through `assess` before escalation; a confirmed input blocker or actual provider failure
 retains the same profile. A model-reported blocked result cannot be accepted as done.
+
+Version 2 distinguishes input-contract/fixture faults from worker-output quality.
+Only a pinned input/fixture assessment authorizes a linked same-ID contract revision
+at the same profile, preserving cumulative attempts, calls, time and deadline.
+Recorded complexity/risk/uncertainty cannot be lowered by that repair. Input/fixture
+corrections that raise demand must still fit the retained profile;
+an ineligible profile blocks without a call/attempt or automatic escalation.
+Provider or stale-source failures do not become quality rejections or escalation authority.
+Legacy unknown origins keep their old routing meaning rather than being relabeled.
+
+`assignment.retry` reports `can_retry_same_profile`, `can_escalate`, remaining unit
+attempts/calls/time, `stop_reason`, `next_profile` and `requires_recovery`. Cap checks
+precede profile escalation. For a rejected result with valid pins but changed
+source/parent/feedback, inspection plus `--recover` is required and retains the
+current profile, including at a profile ceiling. Changed candidate/assessment pins,
+configuration or runtime are blockers, not authority to refresh a source snapshot.
+An unchanged candidate/completed-result reuse is distinct from a new provider call
+and does not consume its exhausted call budget. These are setup/routing facts, not
+measured model quality or an empirical price ranking.

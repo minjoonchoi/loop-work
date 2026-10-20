@@ -391,6 +391,7 @@ if 'ARTIFACT DATA:\n' in prompt:
     raise SystemExit(0)
 trial = pathlib.Path(os.environ['LOOP_BENCH_PROFILE']).parent
 profile = json.loads((trial / 'profile.json').read_text())
+entrypoint = next((trial / 'workspace').glob('*/.loop/loop.py'), pathlib.Path('.loop/loop.py')).resolve()
 effort = profile['efforts'][provider]
 if provider == 'claude':
     values = [sys.argv[i+1] for i, a in enumerate(sys.argv) if a == '--effort'] + [a.split('=',1)[1] for a in sys.argv if a.startswith('--effort=')]
@@ -402,12 +403,35 @@ else:
 session = 'worker-session' if prompt == '__NESTED__' else 'conversation-session'
 if prompt != '__NESTED__':
     if prompt.startswith(('/loop-work ', '$loop-work ')):
-        result = subprocess.run([sys.executable, '.loop/loop.py', 'harness', 'on', '--provider', provider], capture_output=True, text=True, check=True)
+        roots = sorted(x for x in (trial / 'workspace').iterdir() if x.is_dir())
+        args = [sys.executable, str(entrypoint), 'work', 'open', '--kind', 'document', '--title', 'Copy scenario source', '--provider', provider]
+        for root in roots:
+            args += ['--path', str(root)]
+        opened = subprocess.run(args, capture_output=True, text=True, check=True)
+        task = json.loads(opened.stdout)['task']
+        (trial / 'fake-task.json').write_text(json.dumps(task))
+        subprocess.run([sys.executable, str(entrypoint), 'harness', 'on', '--provider', provider, '--session', task['session_id'], '--task', task['id']], capture_output=True, text=True, check=True)
+        goal = {'outcome':'Copy the scenario source objects', 'deliverable':'output.json in each root', 'criteria':[{'id':'copied','description':'Every output equals its source'}], 'decisions':[], 'open_questions':[]}
+        goal_path = trial / 'fake-goal.json'
+        goal_path.write_text(json.dumps(goal))
+        subprocess.run([sys.executable, str(entrypoint), 'work', 'goal', task['id'], '--input', str(goal_path)], capture_output=True, text=True, check=True)
+        subprocess.run([sys.executable, str(entrypoint), 'work', 'start', task['id']], capture_output=True, text=True, check=True)
     if 'nested-probe' in prompt:
         opposite = 'claude' if provider == 'codex' else 'codex'
+        if opposite not in profile['models']:
+            opposite = provider
         args = [opposite, '-p', '--output-format', 'json'] if opposite == 'claude' else [opposite, 'exec', '-']
         subprocess.run(args, input='__NESTED__', text=True, capture_output=True, check=True)
     pathlib.Path('output.json').write_text(pathlib.Path('source.json').read_text())
+    if (trial / 'fake-task.json').is_file():
+        roots = sorted(x for x in (trial / 'workspace').iterdir() if x.is_dir())
+        if all((root / 'output.json').is_file() for root in roots):
+            task = json.loads((trial / 'fake-task.json').read_text())
+            result = {'summary':'Copied source objects', 'outputs':[str(root / 'output.json') for root in roots], 'checks':[{'criterion_id':'copied','satisfied':True,'evidence':'Each output matches the corresponding source object'}]}
+            result_path = trial / 'fake-completion.json'
+            result_path.write_text(json.dumps(result))
+            subprocess.run([sys.executable, str(entrypoint), 'work', 'finish', task['id'], '--input', str(result_path)], capture_output=True, text=True, check=True)
+
 answer = 'The delivered object matches the source value.'
 if provider == 'claude':
     print(json.dumps({'session_id':session,'result':answer,'is_error':False,'total_cost_usd':0.02 if '--resume' in sys.argv else 0.01}))
@@ -436,6 +460,116 @@ class RunnerTests(unittest.TestCase):
             self.actual[provider] = str(path)
         self.models = {'claude': 'fixed-claude', 'codex': 'fixed-codex'}
         self.efforts = {'claude': 'high', 'codex': 'medium'}
+
+    def test_transient_host_config_change_is_retained_and_rejects_run(self):
+        output = self.base / 'host-drift'
+        config = self.base / 'simulated-host-config'
+        config.write_text('A')
+        initial = bench.configuration_identity(config)
+        conversation = transport.conversation
+
+        def run_and_restore(*args, **kwargs):
+            result = conversation(*args, **kwargs)
+            config.write_text('B')
+            config.write_text('A')
+            return result
+
+        with patch('loop_work.benchmark.profile_fingerprint',
+                   side_effect=lambda: {str(config): bench.configuration_identity(config)}), \
+             patch('loop_work.bench_transport.conversation', side_effect=run_and_restore):
+            value = bench.run(self.suite, SOURCE, self.models, ['codex'], 1, 0,
+                              'confined fake drift test', output, executables=self.actual,
+                              efforts=self.efforts)
+        self.assertEqual(config.read_text(), 'A')
+        self.assertEqual(initial['content_sha256'], bench.configuration_identity(config)['content_sha256'])
+        self.assertFalse(read_json(output / 'index.json')['complete'])
+        self.assertFalse(value['passed'])
+        rows = [read_json(p) for p in (output / 'trials').glob('*/result.json')]
+        self.assertTrue(rows)
+        self.assertTrue(all(not row['profile_valid'] for row in rows))
+        self.assertTrue(any(any(o['phase'].endswith('-after') and o['changed_paths']
+                                for o in row['profile_observations']) for row in rows))
+
+    def test_absent_config_create_use_delete_during_call_rejects_run(self):
+        output = self.base / 'absent-host-drift'
+        directory = self.base / 'isolated-config-parent'
+        directory.mkdir()
+        config = directory / 'missing-config'
+        initial = bench.configuration_identity(config)
+        conversation = transport.conversation
+
+        def run_and_delete(*args, **kwargs):
+            result = conversation(*args, **kwargs)
+            config.write_text('temporary configuration')
+            self.assertEqual(config.read_text(), 'temporary configuration')
+            config.unlink()
+            return result
+
+        with patch('loop_work.benchmark.profile_fingerprint',
+                   side_effect=lambda: {str(config): bench.configuration_identity(config)}), \
+             patch('loop_work.bench_transport.conversation', side_effect=run_and_delete):
+            value = bench.run(self.suite, SOURCE, self.models, ['codex'], 1, 0,
+                              'confined absent config drift test', output, executables=self.actual,
+                              efforts=self.efforts)
+        self.assertFalse(config.exists())
+        self.assertNotEqual(initial, bench.configuration_identity(config))
+        self.assertFalse(read_json(output / 'index.json')['complete'])
+        self.assertFalse(value['passed'])
+        rows = [read_json(p) for p in (output / 'trials').glob('*/result.json')]
+        self.assertTrue(any(any(o['phase'].endswith('-after') and o['changed_paths']
+                                for o in row['profile_observations']) for row in rows))
+
+    def test_codex_only_catalog_and_cli_plan_need_no_claude_profile(self):
+        models, efforts = {'codex': 'fixed-codex'}, {'codex': 'medium'}
+        spec = bench.prepare(self.suite, SOURCE, models, ['codex'], 1, 0,
+                             'single provider fixture', efforts=efforts)
+        self.assertEqual(spec['models'], models)
+        self.assertEqual(spec['review_policy']['available_providers'], ['codex'])
+        trial = self.base / 'single-transport'
+        trial.mkdir()
+        env = transport.prepare_transport(trial, models, 3,
+                {'codex': self.actual['codex']}, efforts=efforts)
+        result = subprocess.run([str(trial / 'bin/claude'), '--version'],
+                                capture_output=True, text=True, env={**os.environ, **env})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('outside the frozen benchmark catalog', result.stderr)
+        with self.assertRaises(LoopError):
+            bench.prepare(self.suite, SOURCE, models, ['codex'], 1, 0,
+                          'missing effort', efforts={})
+
+    def test_codex_only_full_check_completes_with_configured_profile_report(self):
+        output = self.base / 'codex-only-check'
+        actual = {'codex': self.actual['codex']}
+        with patch('loop_work.providers.shutil.which', side_effect=actual.get):
+            value = bench_check.check({'codex': 'fixed-codex'}, {'codex': 'medium'},
+                candidate=SOURCE, history=self.base / 'history', suite=self.suite,
+                output=output, repeats=1, executables=actual, judge_provider='codex')
+        self.assertEqual(value['phase'], 'completed', value)
+        self.assertIsNone(value['failure'])
+        self.assertFalse(value['passed'])  # simulation and repeats=1 cannot prove quality
+        improvement = read_json(output / 'improvements.json')
+        self.assertEqual(improvement['profiles'], {'codex': {'model': 'fixed-codex', 'effort': 'medium'}})
+        self.assertEqual(len(read_json(output / 'judgments.json')['samples']), 4)
+        self.assertTrue(all(row['completed'] == row['expected'] == 2
+                            for row in improvement['type_outcomes']))
+        self.assertTrue((output / 'improvements.md').is_file())
+
+    def test_codex_only_full_check_setup_failure_retains_report(self):
+        output = self.base / 'codex-only-failure'
+        with patch('loop_work.benchmark.shutil.which', return_value=None):
+            value = bench_check.check({'codex': 'fixed-codex'}, {'codex': 'medium'},
+                candidate=SOURCE, history=self.base / 'history', suite=self.suite,
+                output=output, repeats=1, judge_provider='codex')
+        self.assertEqual(value['phase'], 'run')
+        self.assertEqual(value['verdict'], 'inconclusive')
+        self.assertFalse(value['passed'])
+        self.assertIn('Every configured CLI', value['failure']['error'])
+        improvement = read_json(output / 'improvements.json')
+        self.assertEqual(set(improvement['profiles']), {'codex'})
+        self.assertEqual(improvement['failure'], value['failure'])
+        self.assertTrue((output / 'check.json').is_file())
+        self.assertTrue((output / 'improvements.md').is_file())
+        self.assertFalse((output / 'judgments.json').exists())
 
     def test_full_check_evaluates_two_types_and_writes_actionable_reports(self):
         output = self.base / 'checked'
@@ -471,7 +605,7 @@ class RunnerTests(unittest.TestCase):
             value = bench_check.check(self.models, self.efforts, candidate=SOURCE, history=self.base / "history", suite=self.suite, output=output)
         self.assertEqual(value['verdict'], 'inconclusive')
         self.assertEqual(value['phase'], 'run')
-        self.assertIn('Both CLI', value['failure']['error'])
+        self.assertIn('Every configured CLI', value['failure']['error'])
         improvement = read_json(output / 'improvements.json')
         self.assertTrue(all(g['quality_mean'] is None for g in improvement['comparisons']))
         self.assertFalse((output / 'judgments.json').exists())
@@ -607,7 +741,7 @@ class RunnerTests(unittest.TestCase):
         with self.assertRaises(LoopError): bench.load_suite(self.suite)
         self.suite = make_suite(self.base / 'other-suite')
         output = self.base / 'no-run'
-        with patch('loop_work.benchmark.shutil.which', return_value=None), self.assertRaisesRegex(LoopError, 'Both CLI'):
+        with patch('loop_work.benchmark.shutil.which', return_value=None), self.assertRaisesRegex(LoopError, 'Every configured CLI'):
             bench.run(self.suite, SOURCE, self.models, ['codex'], 3, 1, 'test', output, efforts=self.efforts)
         self.assertFalse(output.exists())
 

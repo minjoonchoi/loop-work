@@ -62,7 +62,11 @@ class Engine:
             raise LoopError("Contract and discovery must be JSON objects")
         return state, contract, discovery
 
-    def save(self, state, event):
+    def save(self, state, event, db=None):
+        if state.get("phase") in ("completed","aborted") and db is None:
+            with self.knowledge.connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                return self.save(state,event,db=connection)
         state["updated_at"] = now()
         write_json(self.state_path, state)
         # One atomic file per event avoids a partially appended JSONL record after a crash.
@@ -70,12 +74,24 @@ class Engine:
                    {"at": state["updated_at"], "event": event, "phase": state["phase"],
                     "latest_gate": state.get("latest_gate")})
 
+        if state.get("phase") in ("completed","aborted"):
+            # The terminal task and its binding release share this transaction.
+            locations={json.loads(row[0])["id"] for row in db.execute("SELECT body FROM records WHERE kind='location'")
+                       if json.loads(row[0]).get("root")==str(self.root)}
+            for row in db.execute("SELECT body FROM records WHERE kind='task'").fetchall():
+                task=json.loads(row[0])
+                if task.get("goal_id")==self.id and task.get("session_id")==state.get("session_id") and locations.intersection(task.get("locations",[])):
+                    task.update(phase=state["phase"],execution_phase=state["phase"],updated_at=state["updated_at"])
+                    self.knowledge.put("task",task,db)
+
     def inputs(self, contract, discovery):
         return {"contract": digest(contract), "discovery": digest(discovery),
                 "rules": rule_manifest(self.root, contract["rules"]), "engine": engine_digest()}
 
     def check_valid(self, contract, discovery):
-        errors = validate(contract, discovery, self.root)
+        state, _, _ = self.load()
+        errors = validate(contract, discovery, self.root,
+                          review_provider=state.get("review_selection", {}).get("provider"))
         if not isinstance(contract, dict) or contract.get("id") != self.id:
             errors.append("contract.id must match the goal directory")
         if errors:
@@ -131,7 +147,7 @@ class Engine:
 
     def review_routing(self, contract, phase, criterion_ids, current, baseline=None):
         """Route independent reviews from their actual scope, never a host default."""
-        from .routing import select_profile, validate_planning
+        from .routing import review_demand, select_profile, validate_planning
         baseline = baseline or current
         changed = [name for name in set(current["files"]) | set(baseline["files"])
                    if current["files"].get(name) != baseline["files"].get(name)]
@@ -139,27 +155,16 @@ class Engine:
         relevant = [record for record in self.knowledge.list("delegation")
                     if record.get("task_id") == task_id and
                     set(record.get("request", {}).get("planning", {}).get("goal_criteria", [])) & set(criterion_ids)]
-        high_risk = any(record.get("request", {}).get("planning", {}).get("risk") == "high" for record in relevant)
-        high_uncertainty = any(record.get("request", {}).get("planning", {}).get("uncertainty") == "high" for record in relevant)
-        planning = {"goal_criteria": criterion_ids,
-                    "rationale": "Independent review checks accepted criteria against source and verification evidence.",
-                    "verification": "Cover every selected criterion, inspect real behavior and report all findings.",
-                    "complexity": "medium",
-                    "risk": "high" if high_risk else "low", "uncertainty": "high" if high_uncertainty else "low",
-                    "evidence": [str(self.goal_dir / "contract.json") + "#/target/acceptance",
-                                 f"review scope: {len(criterion_ids)} criteria and {len(changed)} changed files"]}
-        if high_risk or high_uncertainty:
-            for record in relevant:
-                demand = record.get("request", {}).get("planning", {})
-                if demand.get("risk") == "high" or demand.get("uncertainty") == "high":
-                    planning["evidence"].append("delegation:" + record["id"] + "#/request/planning")
-                    if len(planning["evidence"]) == 5:
-                        break
+        demand = review_demand(criterion_ids, changed, relevant,
+                               str(self.goal_dir / "contract.json") + "#/target/acceptance")
+        planning = demand["planning"]
         planning = validate_planning(planning, contract, "draft" if phase == "plan" else "running")
-        profile = select_profile(contract["execution"]["routing"],
-                                 providers.reviewer(contract["execution"]["implementer"]), planning)
-        return {"profile": profile, "planning": planning,
-                "selection_reason": "Use the cheapest configured opposite-provider profile meeting the review scope."}
+        state, _, _ = self.load()
+        selection = state.get("review_selection") or providers.review_selection(contract["execution"]["implementer"])
+        profile = select_profile(contract["execution"]["routing"], selection["provider"], planning)
+        return {"profile": profile, "planning": planning, "scope_features": demand["scope_features"],
+                "selection_reason": "Use the cheapest configured profile meeting the selected independent review scope.",
+                "review_selection": selection}
 
     def refresh(self):
         state, contract, discovery = self.load()
@@ -194,6 +199,8 @@ class Engine:
                                                value["next"]["instruction"])
         value["work"] = {"id": work["id"], "kind": "development", "phase": work["phase"]}
         value["delegations"] = self.knowledge.delegations(work["id"])
+        from .retirement import summaries
+        value["retirements"] = summaries(self.knowledge, work["id"])
         history = value["session"]["knowledge"]["tasks"]
         history[:] = [item for item in history if item["id"] != work["id"]]
         history.insert(0, task_summary(work))
@@ -212,33 +219,44 @@ class Engine:
         state, contract, discovery = self.load()
         if state["phase"] != "draft":
             raise LoopError("Plan review is only allowed before freeze")
+        # A failed new preflight must never leave a previous approval usable.
+        # Keep its artifact through latest_gate, but revoke its freeze authority.
+        state.pop("plan_review", None)
+        self.save(state, "plan-review-started")
         self.active()
         original_contract = digest(contract)
         configure_routing(contract["execution"], import_environment=True)
         if digest(contract) != original_contract:
             write_json(self.goal_dir / "contract.json", contract)
+        if "review_selection" not in state:
+            state["review_selection"] = providers.review_selection(contract["execution"]["implementer"])
+            self.save(state, "review-provider-selected")
+        if state["review_selection"]["implementer"] != contract["execution"]["implementer"]:
+            raise LoopError("Review provider selection is pinned; a changed implementer needs a new goal")
         self.check_valid(contract, discovery)
         task_id = self.work_id(state, contract, discovery)
         feedback = completion_feedback(self.knowledge, task_id)
-        state.pop("plan_review", None)
-        self.save(state, "plan-review-started")
         if discovery["baseline_head"] != head(self.root):
             raise LoopError("Update discovery for the current Git HEAD before plan review")
         inputs = self.inputs(contract, discovery)
+        from .harness import cancellation_probe
+        cancel=cancellation_probe(self.knowledge,task_id)
         before = snapshot(self.root)
         run_dir = self.state_dir / "preflight" / uuid.uuid4().hex
-        health = providers.doctor(self.root, run_dir / "doctor")
+        selection = state["review_selection"]
+        health = providers.doctor(self.root, run_dir / "doctor",
+                                  required={contract["execution"]["implementer"], selection["provider"]})
         write_json(run_dir / "doctor.json", health)
         if not health["ok"]:
-            raise LoopError(f"Both CLIs must be available before starting; inspect {run_dir / 'doctor.json'}")
+            raise LoopError(f"Required CLIs must be available before starting; inspect {run_dir / 'doctor.json'}")
         ids = [x["id"] for x in contract["target"]["acceptance"]]
         routing = self.review_routing(contract, "plan", ids, before)
         session = self.session(state, contract, discovery)
         prompt = self.review_prompt(feedback, self.root, contract, discovery, "plan", ids, {}, before,
                                     session_context=session.refresh(self.id))
-        review = providers.review(providers.reviewer(contract["execution"]["implementer"]), self.root,
+        review = providers.review(routing["profile"]["provider"], self.root,
                                   run_dir / "review", prompt, contract["execution"]["review_timeout_seconds"], ids, "plan",
-                                  model=routing["profile"]["model"], effort=routing["profile"]["effort"])
+                                  model=routing["profile"]["model"], effort=routing["profile"]["effort"], cancel=cancel)
         if snapshot(self.root)["digest"] != before["digest"] or self.inputs(*self.load()[1:]) != inputs:
             raise LoopError("Repository changed during read-only plan review; review is invalid")
         report = {"phase": "plan", "at": now(), "passed": review["passed"], "review": review,
@@ -249,6 +267,10 @@ class Engine:
         with self.knowledge.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
+                reason=cancel(db=db)
+                if reason:
+                    report["cancelled"]=True
+                    raise providers.Cancelled(str(reason))
                 completion_feedback(self.knowledge, task_id, feedback["revision"], db=db)
             except LoopError as exc:
                 report.update(passed=False, error=str(exc))
@@ -285,8 +307,12 @@ class Engine:
         self.active()
         self.check_valid(contract, discovery)
         if not state.get("plan_review"):
-            raise LoopError("Run the live cross-provider plan-review before freeze")
+            raise LoopError("Run the live independent plan-review before freeze")
         report = read_json(Path(state["plan_review"]))
+        selection = state.get("review_selection")
+        if (not selection or report.get("routing", {}).get("review_selection") != selection
+                or report.get("review", {}).get("provider") != selection["provider"]):
+            raise LoopError("Plan review provider selection differs from the pinned goal selection")
         task_id = self.work_id(state, contract, discovery)
         feedback = completion_feedback(self.knowledge, task_id)
         if (report.get("feedback_revision") != feedback["revision"] and
@@ -310,7 +336,8 @@ class Engine:
         if state["phase"] != "ready":
             raise LoopError("Only a frozen, ready goal can start")
         self.integrity(state, contract, discovery)
-        routing_readiness(contract["execution"], contract["execution"]["implementer"], development=True)
+        routing_readiness(contract["execution"], contract["execution"]["implementer"], development=True,
+                          review_provider=state.get("review_selection", {}).get("provider"))
         if snapshot(self.root)["digest"] != state["ready_snapshot"]:
             raise LoopError("Code changed since preflight; create a new preflight goal")
         task_id = self.work_id(state, contract, discovery)
@@ -335,10 +362,10 @@ class Engine:
         try:
             self.integrity(state, contract, discovery)
         except LoopError as exc:
-            self.block(str(exc), retryable=False)
+            self._block_internal(str(exc), retryable=False)
             raise
         if state.get("inflight"):
-            self.block("A previous gate was interrupted; inspect its logs before resuming", retryable=True)
+            self._block_internal("A previous gate was interrupted; inspect its logs before resuming", retryable=True)
             raise LoopError("Interrupted gate detected; inspect logs and run resume")
         done = [x["id"] for x in state["milestones"]]
         todo = [x for x in contract["milestones"] if x["id"] not in done]
@@ -348,10 +375,12 @@ class Engine:
             raise LoopError("Checkpoint must match the next incomplete milestone")
         task_id = self.work_id(state, contract, discovery)
         feedback = completion_feedback(self.knowledge, task_id, require_worker=milestone is None)
+        from .harness import cancellation_probe
+        cancel=cancellation_probe(self.knowledge,task_id)
         key = "final" if milestone is None else "milestone-" + milestone
         attempts = state["attempts"].get(key, 0)
         if attempts >= contract["execution"]["max_gate_attempts"] or self.remaining(state, contract) <= 0:
-            self.block("Execution budget exhausted; do not reduce the goal to force a pass", retryable=False)
+            self._block_internal("Execution budget exhausted; do not reduce the goal to force a pass", retryable=False)
             raise LoopError("Execution budget exhausted")
         state["attempts"][key] = attempts + 1
         run_dir = self.state_dir / "gates" / f"{key}-{attempts + 1}-{uuid.uuid4().hex[:8]}"
@@ -375,9 +404,12 @@ class Engine:
                 if remaining <= 0:
                     raise LoopError("Execution budget exhausted")
                 result = execute(check["argv"], inside(self.root, check["cwd"]), run_dir / "checks" / check["id"],
-                                 min(check["timeout_seconds"], max(0.01, remaining)))
-                report["checks"].append({"id": check["id"], "passed": result["exit_code"] == 0 and not result["timed_out"],
+                                 min(check["timeout_seconds"], max(0.01, remaining)), cancel=cancel)
+                report["checks"].append({"id": check["id"], "passed": result["exit_code"] == 0 and not result["timed_out"] and not result.get("cancelled"),
                                          "process": result})
+                if result.get("cancelled"):
+                    report["cancelled"]=True
+                    raise providers.Cancelled(result.get("cancel_reason") or "User interrupted this task")
             after_checks = snapshot(self.root)
             if after_checks["digest"] != before["digest"]:
                 raise LoopError("Checks changed repository inputs. Use ignored output paths; inspect changes and retry.")
@@ -393,19 +425,21 @@ class Engine:
                 report["routing"] = self.review_routing(contract, phase, ids, before, state["baseline_snapshot"])
                 profile = report["routing"]["profile"]
                 report["review"] = providers.review(
-                    providers.reviewer(state["implementer"]), self.root, run_dir / "review", prompt,
+                    profile["provider"], self.root, run_dir / "review", prompt,
                     min(contract["execution"]["review_timeout_seconds"], max(0.01, remaining)), ids, phase,
-                    model=profile["model"], effort=profile["effort"])
+                    model=profile["model"], effort=profile["effort"], cancel=cancel)
                 if snapshot(self.root)["digest"] != before["digest"]:
                     raise LoopError("Read-only reviewer changed repository inputs; review is invalid")
                 self.integrity(state, *self.load()[1:])
                 completion_feedback(self.knowledge, task_id, feedback["revision"], require_worker=milestone is None)
                 report["passed"] = report["review"]["passed"]
             report["snapshot"] = before["digest"]
+        except providers.Cancelled as exc:
+            report.update(cancelled=True,error=str(exc),passed=False)
         except (LoopError, OSError) as exc:
             report["error"] = str(exc)
         except BaseException:
-            self.block("Gate interrupted; inspect logs before resume", retryable=True)
+            self._block_internal("Gate interrupted; inspect logs before resume", retryable=True)
             raise
         report_path = run_dir / "gate.json"
         state.pop("inflight", None)
@@ -422,6 +456,10 @@ class Engine:
         with self.knowledge.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
+                reason=cancel(db=db)
+                if reason:
+                    report["cancelled"]=True
+                    raise providers.Cancelled(str(reason))
                 completion_feedback(self.knowledge, task_id, feedback["revision"],
                                     require_worker=milestone is None, db=db)
             except LoopError as exc:
@@ -443,20 +481,44 @@ class Engine:
             elif report["error"] or (report["review"] and report["review"]["result"]["verdict"] == "blocked"):
                 state.update(phase="blocked", retryable=True,
                              block_reason=report["error"] or report["review"]["result"]["summary"])
-            self.save(state, "gate-passed" if report["passed"] else "gate-failed")
+            self.save(state, "gate-passed" if report["passed"] else "gate-failed", db=db)
         self.session(state, contract, discovery).capture_review(state, contract, discovery, report)
         report["status"] = self.refresh()
         return report
 
-    def block(self, reason, retryable=True):
+    def _block_internal(self, reason, retryable=True):
         state, _, _ = self.load()
         if state["phase"] not in ("running", "blocked"):
             raise LoopError("Only a running or blocked goal can be blocked")
-        state.update(phase="blocked", block_reason=reason, retryable=retryable)
+        state.update(phase="blocked", block_reason=reason, retryable=retryable,
+                     block_proof={"kind": "engine_guard", "reason": reason, "retryable": retryable, "at": now()})
         self.save(state, "blocked")
         return {"phase": "blocked", "reason": reason, "retryable": retryable, "status": self.refresh()}
 
-    def resume(self):
+    def block(self, payload):
+        from .blocking import validate_block
+        from .orchestration import worker_context
+        state, contract, discovery = self.load()
+        if state["phase"] not in ("running", "blocked"):
+            raise LoopError("Only a running or blocked goal can be blocked")
+        task_id = self.work_id(state, contract, discovery)
+        task = self.knowledge.get("task", task_id)
+        proof = validate_block(payload, self.knowledge, task, state, contract["execution"],
+                               worker_context(self.knowledge, task_id))
+        state.update(phase="blocked", block_reason=proof["reason"], retryable=proof["retryable"], block_proof=proof)
+        self.save(state, "evidence-blocked")
+        return {"phase": "blocked", "reason": proof["reason"], "retryable": proof["retryable"],
+                "proof": proof, "status": self.refresh()}
+
+    def retire(self, payload):
+        from .retirement import retire
+        state, contract, discovery = self.load()
+        if state.get("frozen_inputs"):
+            self.integrity(state, contract, discovery)
+        self.refresh()
+        return retire(self.knowledge, self.work_id(), payload)
+
+    def resume(self, *, authority_check=None):
         state, contract, discovery = self.load()
         if state["phase"] != "blocked" or not state.get("retryable"):
             raise LoopError("This goal is not retryable; a changed contract or exhausted budget needs a new preflight goal")
@@ -468,7 +530,11 @@ class Engine:
         feedback = completion_feedback(self.knowledge, task_id)
         with self.knowledge.connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            if authority_check is not None:
+                authority_check(db)
             completion_feedback(self.knowledge, task_id, feedback["revision"], db=db)
+            if self.remaining(state, contract) <= 0:
+                raise LoopError("Run time budget exhausted")
             state.pop("inflight", None)
             state.update(phase="running", block_reason=None, retryable=False)
             self.save(state, "resumed")

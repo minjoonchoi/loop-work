@@ -3,7 +3,7 @@ export LOOP_INSTALL_TARGET := $(value TARGET)
 
 .PHONY: install uninstall test
 install:
-	python3 scripts/install.py --link
+	python3 scripts/install.py --link --workspace
 
 uninstall:
 	python3 scripts/install.py --uninstall

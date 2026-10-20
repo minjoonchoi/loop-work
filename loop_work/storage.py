@@ -143,6 +143,8 @@ def harness_digest():
     paths = list(package.glob("*.py")) + list((source / "rules").glob("*.md"))
     paths += [source / "skills/loop-work/SKILL.md",
               source / "skills/loop-work/agents/openai.yaml"]
+    paths += [package / folder / name for folder in ("human_ui_assets", "board_ui_assets")
+              for name in ("index.html", "app.js", "style.css")]
     return digest({"version": 1, "files": {
         path.relative_to(source).as_posix(): file_hash(path) for path in sorted(paths)}})
 

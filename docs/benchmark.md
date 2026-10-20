@@ -123,7 +123,7 @@ python3 scripts/benchmark.py \
 미사용 결과만 나빠졌거나 양쪽이 같이 좋아진 경우를 하네스 개선이라고 표시하지 않습니다.
 같은 소스의 반복 측정은 기준을 교체하지 않아 유리한 결과만 골라 기준을 높이지 않습니다.
 
-과제·검사·평가 기준, 두 제공자의 모델·effort, 라우팅 모드·허용 풀, 평가자·평가 횟수, 제공자 선택, 반복 수,
+과제·검사·평가 기준, 구성한 제공자 각각의 모델·effort, 라우팅 모드·허용 풀, 평가자·평가 횟수, 제공자 선택, 반복 수,
 시드, 예산, 환경·설정 해시, CLI 버전이 같아야 전후 비교합니다. 바뀐 설정은 별도 기준으로
 기록하며 기존 기록을 지우지 않습니다. 모델 비교와 하네스 변경 비교를 섞지 마세요.
 같은 모델 ID의 서비스 내부 변경이나 시간대 차이는 완전히 통제할 수 없습니다.
@@ -215,8 +215,10 @@ python3 scripts/loop.py bench gate "$BENCH_RUN_DIR" \
 셸의 `&&`로 `run`과 `judge`를 연결하면 평가가 생략될 수 있으므로 전체 실행에는 `bench check`를 사용합니다.
 실패·부분 실행의 로그를 보존하며, 재실행은 새 디렉터리에 모든 대상을 실행합니다.
 
-두 CLI에 기존 인증이 필요합니다. 하네스의 교차 검토까지 비교하므로 `--provider`를
-하나만 선택해도 두 CLI가 필요합니다. 별도 API 키나 SDK는 필요하지 않습니다.
+구성한 CLI에는 기존 인증이 필요합니다. 반대 CLI가 없으면 Codex 모델·effort만 명시해
+`--provider codex`로 실행할 수 있고 검토는 같은 제공자의 새 호출로 수행합니다. 두 CLI를
+구성하면 교차 검토를 유지합니다. 선택된 CLI의 호출 실패를 같은 제공자로 재시도하지 않습니다.
+제공자 catalog와 검토 정책은 고정된 실험 프로필이며 단일·교차 제공자 결과는 별도 baseline입니다. 별도 API 키나 SDK는 필요하지 않습니다.
 중첩 실행·쓰기 권한을 호스트가 거절하면 제한을 우회하지 않고 근거 부족으로 보고합니다.
 
 ## 결과와 규칙 개선
@@ -305,3 +307,52 @@ Codex의 보고 토큰과 Claude의 세션 누적 비용 추정치를 보존합�
 기존 `loop-dev-benchmarks/history/<소스 경로 ID>/`가 있으면 같은 소스 경로에서 계속 사용합니다.
 두 이름의 기록이 모두 있으면 `--history`로 선택해야 합니다. 소스 디렉터리 이름도 바꾸면
 기존 기록의 절대 경로를 `--history`로 지정하고, 기존 실행 결과 폴더는 옮기지 않습니다.
+
+### 관리 호출 계측과 환경 변경
+
+벤치마크 환경의 하네스 worker/review/preflight 호출은 `LOOP_BENCH_PROFILE`의
+trial 전용 wrapper 절대 경로를 사용한다. 도구 shell이 PATH를 재구성해도 실제
+CLI로 직접 폴백하지 않는다. 대화, `.loop/state`, `knowledge/runs`의 process receipt 및 prompt hash를
+call ledger와 대조하며, 누락·중복·미완료 호출은 `calls_complete=false`로 판정한다.
+정상적인 직접 nested/structured CLI 호출은 runtime receipt 없이도 ledger의 실제 호출로
+보존하고 `ledger_only_untyped_calls`로 구분한다. 관리 worker/review receipt의 누락이나
+중복은 통과하지 않는다. 이 계측은 관리 호출의 증거 검사이며 임의의 절대 경로 실행을 차단하는 OS sandbox는 아니다.
+
+전역 설정의 전체 파일 hash와 비접근시간 metadata(dev/ino/mode/size/mtime_ns/ctime_ns)는
+시작 기준과 각 trial 시작·turn 전후·최종 시점에 비교한다. 심볼릭 링크는 링크 identity와
+해결된 파일의 전체 내용·metadata를 함께 기록한다. 설정이 없으면 가장 가까운 기존
+상위 디렉터리의 metadata와 경로의 symlink identity를 검사해 생성·사용·삭제 후 원복도
+감지한다. 이 보수적인 검사는 같은 상위 디렉터리에서 설정과 무관한 파일 생성·삭제가
+발생해도 실행을 무효화할 수 있다. 관측 중 경로·identity가 불안정하면 실패 처리한다.
+`result.json`의 `profile_observations`에는 identity·hash와 변경된 경로만 남기며 설정 원문이나
+인증 정보를 복제하지 않는다. 중간 변경이 복원되어 최종 hash가 같아져도 관측된 변경이
+있거나 metadata 변화가 남으면 run은 통과하지 않는다. 접근시간은 읽기 자체의 잡음을
+피하려고 제외한다. 이는 협조적인 로컬 실행에서 경계 관측과 filesystem metadata로 변동을
+감지하는 guard이며, 모든 악의적 교체나 metadata까지 복원한 변경을 탐지하는 연속 OS
+감시를 보장하지 않는다. 실패한 측정은 보존하며 전역 설정은 자동 수정하지 않는다.
+
+### 실행 전 trial 경로 고정
+
+`bench run`과 `bench check`의 선택 인자 `--trial-plan FILE`은 기존 seed로 생성한
+실험 순서를 유지하면서 trial ID와 workspace의 정확한 경로만 미리 고정한다. 버전 1
+계획에는 `version`, `output`, `experiment`, `experiment_hash`, `trials`, `seal`만 둔다.
+`experiment`는 arms/suite_hash/models/efforts/providers/repeats/seed/environment/
+evaluation/routing/review_policy를 포함하며, judge 설정도 실행과 정확히 일치해야 한다.
+`seal`은 자기 필드를 제외한 계획의 canonical JSON SHA256이다. `trials`의 각 행은
+case/provider/repeat/arm/id/roots만 가지며 기존 schedule의 전체 순서와 일치해야 한다.
+ID는 중복 없는 소문자 32자리 hex, roots는 output/trials/ID/workspace/fixture-root의
+정확한 절대 경로다. 일반 `bench run`의 evaluation=None을 judge가 있는 계획으로
+암묵적으로 바꾸지 않는다.
+
+계획은 symlink 없는 2MiB 이하 파일이어야 한다. 잘못된 계획은 output 생성·CLI version
+검사 전에 거절한다. `bench check`는 준비 단계에서 검증한 파일 hash를 run에도 전달한다.
+manifest는 계획 원문·경로·hash·seal을 보존하고 output의 trial-plan.json에도 원문을
+봉인한다. 실행 중 외부 계획이나 봉인 사본이 바뀌면 complete=false다. 계획 모드의
+planning_protocol은 이전 실험 profile과 구분되지만, 계획의 개별 UUID·output 경로는
+before/after profile equality에 포함하지 않는다.
+
+이 옵션은 Codex trust나 host 설정을 변경하지 않는다. 필요한 trust 준비는 정확한
+workspace 목록과 추가 설정만 별도 검토한 뒤 사용자 승인으로 수행하고, strict host
+fingerprint를 그 이후 새로 동결한다. 기존 설정·인증·hooks·CODEX_HOME을 보존하며
+계획이 있다고 자동 등록하거나 검사를 완화하지 않는다. 옵션을 생략한 실행은 기존
+UUID 생성과 seeded 순서를 유지한다.

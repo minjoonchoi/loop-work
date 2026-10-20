@@ -11,7 +11,7 @@ import time
 from unittest.mock import patch
 
 from loop_work.process import execute
-from loop_work.storage import LoopError, locked
+from loop_work.storage import LoopError, locked, snapshot
 from support import ProjectTest
 
 
@@ -32,7 +32,8 @@ class InstallationTests(ProjectTest):
             self.assertEqual(content, (self.root / name).read_bytes())
         self.assertIn("Original Claude instructions", (self.root / "CLAUDE.md").read_text())
         self.assertEqual((self.root / "AGENTS.md").read_text().count(installer.START), 1)
-        result = subprocess.run([sys.executable, str(self.root / ".loop/loop.py"), "init", "installed",
+        result = subprocess.run([sys.executable, str(self.root / ".loop/loop.py"), "--knowledge-home",
+                                 str(Path(self.temp.name) / "installed-knowledge"), "init", "installed",
                                  "--title", "Build from conversation", "--implementer", "codex"],
                                 cwd=self.root, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -75,6 +76,31 @@ class InstallationTests(ProjectTest):
 
 
 class ProcessTests(ProjectTest):
+    def test_python_check_import_preserves_snapshot_but_source_write_does_not(self):
+        (self.root / "local_check_subject.py").write_text("VALUE = 7\n")
+        before = snapshot(self.root)
+        with patch.dict(os.environ):
+            os.environ.pop("PYTHONDONTWRITEBYTECODE", None)
+            result = execute([sys.executable, "-c", "import local_check_subject; assert local_check_subject.VALUE == 7"],
+                             self.root, self.engine.state_dir / "import-check", 5)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertFalse((self.root / "__pycache__").exists())
+        self.assertEqual(snapshot(self.root), before)
+        changed = execute([sys.executable, "-c",
+                           "from pathlib import Path; Path('local_check_subject.py').write_text('VALUE = 8\\n')"],
+                          self.root, self.engine.state_dir / "source-write-check", 5)
+        self.assertEqual(changed["exit_code"], 0)
+        self.assertNotEqual(snapshot(self.root), before)
+
+    def test_python_bytecode_setting_preserves_explicit_host_and_call_values(self):
+        for host, overrides, expected in (("0", None, "0"), ("0", {"PYTHONDONTWRITEBYTECODE": "1"}, "1")):
+            with self.subTest(host=host, overrides=overrides), patch.dict(os.environ, {"PYTHONDONTWRITEBYTECODE": host}):
+                result = execute([sys.executable, "-c", "import os; print(os.environ['PYTHONDONTWRITEBYTECODE'])"],
+                                 self.root, self.engine.state_dir / ("env-" + expected), 5,
+                                 env_overrides=overrides)
+            self.assertEqual(result["exit_code"], 0)
+            self.assertEqual(Path(result["stdout"]).read_text().strip(), expected)
+
     def test_process_has_eof_instead_of_interactive_stdin(self):
         result = execute([sys.executable, "-c", "import sys; assert sys.stdin.read() == ''"],
                          self.root, self.engine.state_dir / "process", 2)

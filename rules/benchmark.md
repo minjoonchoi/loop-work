@@ -7,7 +7,7 @@ work does not need a benchmark experiment. See the source repository's
 ## Before execution
 
 - Restore prior benchmark decisions. Fix the current harness snapshot,
-  suite, concrete model IDs and explicit efforts for BOTH providers, judge
+  suite, concrete model IDs and explicit efforts for every configured provider, judge
   provider/model/effort, environment, repetitions and call/time budgets. Use
   `scripts/benchmark.py` (`bench check`) for run → judge → gate → improvement report;
   `--dry-run` validates the full configuration without model calls.
@@ -23,12 +23,15 @@ work does not need a benchmark experiment. See the source repository's
   before/after quality comparison as unverified; do not invent a baseline.
 - Use identical fixtures, requests, profiles and budgets for plain/candidate.
   `--routing-profile FILE` evaluates worker selection with the same explicit allowed
-  pool in both arms; it must include both pinned root model/effort pairs. The judge
+  pool in both arms; it must include all pinned root model/effort pairs. The judge
   stays separately fixed. Without the option, nested calls retain one fixed pair
   per provider. Record mode/policy/hash; changing them starts a separate baseline.
   Workers, reviewers, rejected attempts and retries share the original call/time budget.
   Use a dedicated host profile without an automatically activated global harness.
   Preserve existing permissions, credentials and hooks; do not bypass nested-CLI limits.
+- A single-provider catalog supports fresh same-provider review when the opposite CLI
+  is absent. Record the catalog and review policy; never compare it as the same
+  experiment profile as cross-provider review. Every used model/effort remains explicit.
 - Keep outcome checks outside the agent workspace. Freeze the rubric, weights,
   critical criteria and gate thresholds before looking at candidate scores.
 - Include realistic development, small edits, non-development and session reuse.

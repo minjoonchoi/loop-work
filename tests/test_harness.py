@@ -32,97 +32,70 @@ class ConversationTests(unittest.TestCase):
         self.harness = Harness(self.kb)
         self.work = Work(self.kb)
 
-    def test_new_and_legacy_sessions_are_off_and_do_not_adopt_an_active_session(self):
-        first = self.harness.on('codex')
-        legacy = self.kb.session('codex')
-        self.assertNotIn('harness', legacy)
+    def opened(self, provider='codex', session_id=None):
+        return self.work.open('planning','Plan the requested result',provider,[self.root],session_id)['task']
+
+    def test_no_task_or_invalid_binding_has_no_mutation_and_legacy_is_inactive(self):
+        before=self.kb.list('session')
+        with self.assertRaisesRegex(LoopError,'task_id'):
+            self.harness.on('codex')
+        self.assertEqual(self.kb.list('session'),before)
+        legacy=self.kb.session('codex')
+        self.kb.put('session',{**legacy,'harness':{'enabled':True}})
         self.assertFalse(self.harness.status(legacy['id'])['enabled'])
-        task = self.work.open('explanation', 'Explain source', 'codex', [self.root])
-        self.assertFalse(task['knowledge']['harness']['enabled'])
-        second = self.harness.on('codex')
-        self.assertEqual(len({first['session_id'], second['session_id'], task['task']['session_id'], legacy['id']}), 4)
-        self.assertTrue(self.harness.status(first['session_id'])['enabled'])
+        task=self.opened()
+        before={kind:self.kb.list(kind) for kind in ('session','task')}
+        for call in (lambda:self.harness.on('claude',task_id=task['id']),
+                     lambda:self.harness.on('codex','unknown',task['id']),
+                     lambda:self.harness.on('codex',task_id='missing')):
+            with self.assertRaises(LoopError): call()
+        self.assertEqual(before,{kind:self.kb.list(kind) for kind in before})
 
-    def test_completion_new_task_kinds_and_directory_changes_keep_activation(self):
-        enabled = self.harness.on('codex')
-        session_id = enabled['session_id']
-        for index, kind in enumerate(('explanation', 'document', 'research', 'review', 'planning')):
-            root = self.base / ('project-' + str(index))
-            root.mkdir()
-            opened = self.work.open(kind, 'Describe the expected output', 'codex', [root], session_id)
-            task_id = opened['task']['id']
-            self.work.define(task_id, {
-                'outcome': 'Describe the requested result.', 'deliverable': 'An inline answer.',
-                'criteria': [{'id': 'C1', 'description': 'State the result in a concrete sentence.'}],
-                'decisions': [], 'open_questions': []})
-            self.work.start(task_id)
-            result = self.work.finish(task_id, {
-                'summary': 'The requested result is described.', 'outputs': ['conversation:answer'],
-                'checks': [{'criterion_id': 'C1', 'satisfied': True, 'evidence': 'The answer states the result.'}]})
-            self.assertEqual(result['task']['phase'], 'completed')
-            self.assertEqual(result['knowledge']['harness'], enabled)
-            self.assertIn('all inputs in this conversation', Path(result['knowledge']['document']).read_text())
-            # A fresh runtime reading persisted state is sufficient; no in-memory singleton.
-            self.assertEqual(Harness(KnowledgeBase(self.kb.home)).status(session_id), enabled)
-        self.assertEqual(len(self.kb.list('session')), 1)
+    def test_completion_releases_only_bound_task_and_new_task_needs_explicit_on(self):
+        task=self.opened(); enabled=self.harness.on('codex',task_id=task['id'])
+        self.assertEqual(enabled['scope'],'task'); self.assertEqual(enabled['inputs'],'related')
+        other=self.opened(session_id=task['session_id'])
+        with self.assertRaisesRegex(LoopError,'Another unfinished'):
+            self.harness.on('codex',task_id=other['id'])
+        self.work.define(task['id'],{'outcome':'Describe the plan.','deliverable':'A concrete plan.',
+            'criteria':[{'id':'C1','description':'State the plan.'}],'decisions':[],'open_questions':[]})
+        self.work.start(task['id'])
+        result=self.work.finish(task['id'],{'summary':'The plan is recorded.','outputs':['conversation:answer'],
+            'checks':[{'criterion_id':'C1','satisfied':True,'evidence':'The answer states the plan.'}]})
+        self.assertTrue(result['passed'])
+        status=self.harness.status(task['session_id'])
+        self.assertFalse(status['enabled']); self.assertEqual(status['task_id'],task['id'])
+        self.assertEqual(status['release_reason'],'completed')
+        self.assertFalse(self.work.context(other['id'])['knowledge']['harness']['enabled'])
+        self.assertTrue(self.harness.on('codex',task_id=other['id'])['enabled'])
 
-    def test_toggle_is_idempotent_and_preserves_work_knowledge_and_budgets(self):
-        enabled = self.harness.on('claude')
-        session_id = enabled['session_id']
-        task = self.work.open('planning', 'Plan a change', 'claude', [self.root], session_id)['task']
-        self.work.stop(task['id'], 'User paused this task')
-        self.kb.put('worker-budget', {'id': task['id'], 'calls': 3})
-        locations = [self.kb.attach(self.root)]
-        topic = {'id': 'local-choice', 'kind': 'decision', 'scope': 'session', 'status': 'confirmed',
-                 'summary': 'Describe the plan in Korean.', 'paths': [], 'evidence': ['conversation:user'],
-                 'basis': 'user', 'applies_to': 'This conversation'}
-        self.kb.remember(topic, locations, self.kb.context(locations)['revision'], session_id, task['id'])
-        knowledge_before = self.kb.get('topic', topic['id'])
-        task_before = self.kb.get('task', task['id'])
-        history = self.kb.history('session', session_id)
-        self.assertEqual(self.harness.on('claude', session_id), enabled)
-        self.assertEqual(self.kb.history('session', session_id), history)
-        self.assertTrue(self.harness.status(session_id)['enabled'])
-        off = self.harness.off(session_id)
-        self.assertFalse(off['enabled'])
-        history = self.kb.history('session', session_id)
-        self.assertEqual(self.harness.off(session_id), off)
-        self.assertEqual(self.kb.history('session', session_id), history)
-        self.assertFalse(self.work.context(task['id'])['knowledge']['harness']['enabled'])
-        self.assertTrue(self.harness.on('claude', session_id)['enabled'])
-        self.assertEqual(self.kb.get('task', task['id']), task_before)
-        self.assertEqual(self.kb.get('worker-budget', task['id'])['calls'], 3)
-        self.assertEqual(self.kb.get('topic', topic['id']), knowledge_before)
+    def test_binding_is_idempotent_and_off_preserves_task_goal_and_budget(self):
+        task=self.opened('claude'); enabled=self.harness.on('claude',task_id=task['id'])
+        history=self.kb.history('session',task['session_id'])
+        self.assertEqual(self.harness.on('claude',task['session_id'],task['id']),enabled)
+        self.assertEqual(self.kb.history('session',task['session_id']),history)
+        self.kb.put('worker-budget',{'id':task['id'],'calls':3})
+        off=self.harness.off(task['session_id'])
+        self.assertFalse(off['enabled']); self.assertEqual(self.harness.off(task['session_id']),off)
+        self.assertEqual(self.kb.get('task',task['id']),task)
+        self.assertEqual(self.kb.get('worker-budget',task['id'])['calls'],3)
+        self.assertTrue(self.harness.on('claude',task_id=task['id'])['enabled'])
 
-    def test_unknown_invalid_and_other_provider_bindings_do_not_create_sessions(self):
-        enabled = self.harness.on('claude')
-        before = self.kb.list('session')
-        for operation in (lambda: self.harness.status('unknown'), lambda: self.harness.off('unknown'),
-                          lambda: self.harness.on('codex', 'unknown'),
-                          lambda: self.harness.on('codex', enabled['session_id']),
-                          lambda: self.harness.status('../invalid')):
-            with self.assertRaises(LoopError):
-                operation()
-        self.assertEqual(self.kb.list('session'), before)
-
-    def test_source_and_installed_cli_keep_binding_outside_git_and_installation(self):
+    def test_source_and_installed_cli_bind_explicit_task_outside_project(self):
         installer.install(self.root)
-        other = self.base / 'other'
-        other.mkdir()
-        for entrypoint in (SOURCE / 'scripts/loop.py', self.root / '.loop/loop.py'):
+        other=self.base/'elsewhere'; other.mkdir()
+        for entrypoint in (SOURCE/'scripts/loop.py',self.root/'.loop/loop.py'):
+            task=self.opened()
             def run(*args):
-                result = subprocess.run([sys.executable, str(entrypoint), '--knowledge-home', str(self.kb.home),
-                                         *args], cwd=other, capture_output=True, text=True)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                return json.loads(result.stdout)
-            on = run('harness', 'on', '--provider', 'codex')
-            self.assertTrue(on['enabled'])
-            self.assertEqual(Path(on['entrypoint']), entrypoint.resolve())
-            self.assertEqual(run('harness', 'status', on['session_id']), on)
-            self.assertFalse(run('harness', 'off', on['session_id'])['enabled'])
-            again = run('harness', 'on', '--provider', 'codex', '--session', on['session_id'])
-            self.assertEqual(again['session_id'], on['session_id'])
-        self.assertEqual(list(other.iterdir()), [])
+                process=subprocess.run([sys.executable,str(entrypoint),'--knowledge-home',str(self.kb.home),*args],
+                    cwd=other,capture_output=True,text=True)
+                self.assertEqual(process.returncode,0,process.stderr)
+                return json.loads(process.stdout)
+            on=run('harness','on','--provider','codex','--task',task['id'])
+            self.assertTrue(on['enabled']); self.assertEqual(on['task_id'],task['id'])
+            self.assertEqual(Path(on['entrypoint']),entrypoint.resolve())
+            self.assertFalse(run('harness','off',on['session_id'])['enabled'])
+        self.assertEqual(list(other.iterdir()),[])
 
     def test_installed_skill_changes_stale_dependent_knowledge(self):
         installer.install(self.root)
@@ -156,7 +129,7 @@ class SkillInstallationTests(ProjectTest):
         self.assertIn('allow_implicit_invocation: false', (self.root / HARNESS_SKILL_FILES[1]).read_text())
         manifest = read_json(self.root / '.loop/install.json')
         self.assertTrue(set(HARNESS_SKILL_FILES).issubset(manifest['files']))
-        self.assertIn('route EVERY subsequent input', (self.root / 'AGENTS.md').read_text())
+        self.assertNotIn('route EVERY subsequent input', (self.root / 'AGENTS.md').read_text())
         self.assertNotIn('Old ordinary-request entry', (self.root / 'AGENTS.md').read_text())
         self.assertEqual(unrelated.read_text(), 'Keep this skill.\n')
         self.assertEqual(settings.read_text(), '{"hooks": {}}\n')
@@ -209,19 +182,17 @@ class SkillInstallationTests(ProjectTest):
             self.engine.gate('M1')
         self.assertEqual(self.state()['phase'], 'blocked')
 
-    def test_development_completion_next_goal_and_off_keep_the_same_session(self):
-        state = self.state()
-        harness = Harness(self.engine.knowledge)
-        enabled = harness.on('claude', state['session_id'])
+    def test_development_completion_releases_binding_and_preserves_session_identity(self):
+        state=self.state(); harness=Harness(self.engine.knowledge)
+        task_id=self.engine.refresh()['work_id']
+        enabled=harness.on('claude',state['session_id'],task_id)
         self.running()
         self.assertTrue(self.engine.gate('M1')['passed'])
         self.assertTrue(self.engine.gate()['passed'])
-        packet = read_json(self.engine.state_dir / 'context.json')
-        self.assertEqual(packet['session']['harness'], enabled)
-        other = Engine(self.root, 'next-goal', self.engine.knowledge)
-        other.initialize('Another goal', 'claude', state['session_id'])
-        self.assertEqual(read_json(other.state_dir / 'context.json')['session']['harness'], enabled)
-        before = self.state()
-        harness.off(state['session_id'])
-        self.assertEqual(self.state(), before)
-        self.assertFalse(read_json(self.engine.refresh()['context'])['session']['harness']['enabled'])
+        status=harness.status(state['session_id'])
+        self.assertFalse(status['enabled']); self.assertEqual(status['release_reason'],'completed')
+        other=Engine(self.root,'next-goal',self.engine.knowledge)
+        other.initialize('Another goal','claude',state['session_id'])
+        self.assertFalse(read_json(other.state_dir/'context.json')['session']['harness']['enabled'])
+        task=other.refresh()['work_id']
+        self.assertTrue(harness.on('claude',state['session_id'],task)['enabled'])

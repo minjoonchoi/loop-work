@@ -20,7 +20,7 @@ from .storage import LoopError, locked, read_json, repository
 def parser():
     result = argparse.ArgumentParser(description="loop-work: goal setting, work and reusable local knowledge")
     result.add_argument("--root", type=Path, default=Path.cwd(), help="Target repository root")
-    result.add_argument("--knowledge-home", type=Path, help="Local knowledge directory (default: LOOP_KB_HOME or ~/.local/share/loop-work)")
+    result.add_argument("--knowledge-home", type=Path, help="Local knowledge directory (default: LOOP_KB_HOME or ~/.loop-work/data; existing legacy DB retained)")
     commands = result.add_subparsers(dest="command", required=True)
     bench = commands.add_parser("bench", help="Compare the same tasks with and without the current harness")
     bench_commands = bench.add_subparsers(dest="bench_command", required=True)
@@ -29,10 +29,10 @@ def parser():
         sub = bench_commands.add_parser(name)
         sub.add_argument("--suite", type=Path, required=name != "check", default=source / "benchmarks/suite.json")
         sub.add_argument("--candidate", type=Path, required=name != "check", default=source)
-        sub.add_argument("--codex-model", required=True)
-        sub.add_argument("--claude-model", required=True)
-        sub.add_argument("--codex-effort", required=True)
-        sub.add_argument("--claude-effort", required=True)
+        sub.add_argument("--codex-model")
+        sub.add_argument("--claude-model")
+        sub.add_argument("--codex-effort")
+        sub.add_argument("--claude-effort")
         sub.add_argument("--routing-profile", type=Path, help="Explicit worker routing policy; omitted uses the fixed benchmark models and efforts")
         sub.add_argument("--provider", choices=("claude", "codex"), action="append", required=name != "check")
         sub.add_argument("--repeats", type=int, default=3)
@@ -40,6 +40,7 @@ def parser():
         sub.add_argument("--environment", required=name != "check", help="Fixed host, credentials and configuration profile description")
         if name in ("run", "check"):
             sub.add_argument("--output", type=Path, required=name == "run")
+            sub.add_argument("--trial-plan", type=Path, help="Sealed exact trial IDs and workspace roots; no trust settings are changed")
         if name == "check":
             sub.add_argument("--history", type=Path, help="Persistent before/after baselines; defaults beside the candidate source")
             sub.add_argument("--judge-provider", choices=("claude", "codex"), default="codex")
@@ -62,11 +63,45 @@ def parser():
             sub.add_argument("--repeats", type=int, default=2)
         if name == "proposal":
             sub.add_argument("--input", type=Path, required=True)
-    harness = commands.add_parser("harness", help="Enable or disable the harness for a known conversation")
+    board = commands.add_parser("board", help="Track and approve work from the Obsidian vault")
+    board_commands = board.add_subparsers(dest="board_command", required=True)
+    for name in ("serve", "list", "show"):
+        sub = board_commands.add_parser(name)
+        sub.add_argument("--vault", type=Path, help="Explicit vault opt-in for a custom knowledge store")
+        sub.add_argument("--session")
+        sub.add_argument("--task")
+        if name == "serve":
+            sub.add_argument("--port", type=int, default=0)
+            sub.add_argument("--no-open", action="store_true", help="Keep serving without opening a browser")
+        elif name == "show":
+            sub.add_argument("id")
+            sub.add_argument("--kind", choices=("task", "human-request"), default="human-request")
+    human = commands.add_parser("human", help="Local human decisions and explicitly bounded actions")
+    human_commands = human.add_subparsers(dest="human_command", required=True)
+    for name in ("list", "serve"):
+        sub = human_commands.add_parser(name)
+        sub.add_argument("--session")
+        sub.add_argument("--task")
+        if name == "list":
+            sub.add_argument("--include-closed", action="store_true")
+        else:
+            sub.add_argument("--port", type=int, default=0)
+    human_commands.add_parser("show").add_argument("id")
+    request = human_commands.add_parser("request")
+    request.add_argument("task")
+    request.add_argument("--input", type=Path, required=True)
+    for name in ("respond", "execute"):
+        sub = human_commands.add_parser(name)
+        sub.add_argument("id")
+        sub.add_argument("--expected-revision", type=int, required=True)
+        if name == "respond":
+            sub.add_argument("--input", type=Path, required=True)
+    harness = commands.add_parser("harness", help="Bind or release the harness for one explicit task")
     harness_commands = harness.add_subparsers(dest="harness_command", required=True)
     enabled = harness_commands.add_parser("on")
     enabled.add_argument("--provider", choices=("claude", "codex"), required=True)
-    enabled.add_argument("--session", help="Current conversation's bound ID; omit only for a new conversation")
+    enabled.add_argument("--session", help="Owning session ID of the explicit task")
+    enabled.add_argument("--task", required=True, help="Existing common-work or development task record ID")
     for name in ("status", "off"):
         harness_commands.add_parser(name).add_argument("session_id")
     orchestration = commands.add_parser("orchestration", help="Restore compact parent context and record user feedback")
@@ -106,13 +141,18 @@ def parser():
         delegated.add_argument("goal")
         delegated.add_argument("--input", type=Path, required=True)
         delegated.add_argument("--recover", help="Reason for retrying an inspected interrupted worker")
+        if name == "delegate":
+            delegated.add_argument("--check", action="store_true", help="Read-only dispatch setup check; no provider calls or task changes")
     assessed = commands.add_parser("assess", help="Accept or reject a staged worker candidate against its goal")
     assessed.add_argument("goal")
     assessed.add_argument("--input", type=Path, required=True)
     for name in ("block", "abort"):
         sub = commands.add_parser(name)
         sub.add_argument("goal")
-        sub.add_argument("--reason", required=True)
+        sub.add_argument("--input", type=Path, required=True) if name == "block" else sub.add_argument("--reason", required=True)
+    retired = commands.add_parser("retire", help="Retire a failed assignment obligation with accepted replacements")
+    retired.add_argument("goal")
+    retired.add_argument("--input", type=Path, required=True)
     note = commands.add_parser("note")
     note.add_argument("goal")
     note.add_argument("--kind", choices=("discovery", "decision", "replan"), required=True)
@@ -133,6 +173,8 @@ def parser():
         delegated.add_argument("--input", type=Path, required=True)
         delegated.add_argument("--path", type=Path)
         delegated.add_argument("--recover")
+        if name == "delegate":
+            delegated.add_argument("--check", action="store_true", help="Read-only dispatch setup check; no provider calls or task changes")
     assessed_work = work_commands.add_parser("assess")
     assessed_work.add_argument("task")
     assessed_work.add_argument("--input", type=Path, required=True)
@@ -146,7 +188,10 @@ def parser():
     for name in ("block", "abort"):
         sub = work_commands.add_parser(name)
         sub.add_argument("task")
-        sub.add_argument("--reason", required=True)
+        sub.add_argument("--input", type=Path, required=True) if name == "block" else sub.add_argument("--reason", required=True)
+    retired_work = work_commands.add_parser("retire")
+    retired_work.add_argument("task")
+    retired_work.add_argument("--input", type=Path, required=True)
     note_work = work_commands.add_parser("note")
     note_work.add_argument("task")
     note_work.add_argument("--text", required=True)
@@ -216,7 +261,9 @@ def common_command(args, knowledge):
     if cmd == "finish":
         return work.finish(args.task, read_json(args.input))
     if cmd in ("block", "abort"):
-        return work.stop(args.task, args.reason, abort=cmd == "abort")
+        return work.stop(args.task, read_json(args.input) if cmd == "block" else args.reason, abort=cmd == "abort")
+    if cmd == "retire":
+        return work.retire(args.task, read_json(args.input))
     if cmd == "note":
         return work.note(args.task, args.text, args.evidence)
     return getattr(work, cmd)(args.task)
@@ -228,22 +275,26 @@ def main(argv=None, *, entrypoint=None):
         if args.command == "bench":
             from . import benchmark, bench_report
             cmd = args.bench_command
+            if cmd in ("plan", "run", "check"):
+                models = {p: getattr(args, p + "_model") for p in ("codex", "claude")
+                          if getattr(args, p + "_model") is not None}
+                efforts = {p: getattr(args, p + "_effort") for p in ("codex", "claude")
+                           if getattr(args, p + "_effort") is not None}
             if cmd == "check":
                 from .bench_check import check
-                output = check({"codex": args.codex_model, "claude": args.claude_model},
-                    {"codex": args.codex_effort, "claude": args.claude_effort},
+                output = check(models,
+                    efforts,
                     candidate=args.candidate, suite=args.suite,
                     providers=args.provider, repeats=args.repeats, seed=args.seed, environment=args.environment,
                     output=args.output, judge_provider=args.judge_provider, judge_model=args.judge_model,
                     judge_effort=args.judge_effort, judge_repeats=args.judge_repeats, dry_run=args.dry_run,
-                    history=args.history, routing_profile=args.routing_profile)
+                    history=args.history, routing_profile=args.routing_profile, trial_plan=args.trial_plan)
             elif cmd in ("plan", "run"):
                 values = [args.suite, args.candidate,
-                          {"codex": args.codex_model, "claude": args.claude_model},
+                          models,
                           args.provider, args.repeats, args.seed, args.environment]
-                efforts = {"codex": args.codex_effort, "claude": args.claude_effort}
                 output = (benchmark.prepare(*values, efforts=efforts, routing_profile=args.routing_profile) if cmd == "plan" else
-                          benchmark.run(*values, args.output, efforts=efforts, routing_profile=args.routing_profile))
+                          benchmark.run(*values, args.output, efforts=efforts, routing_profile=args.routing_profile, trial_plan=args.trial_plan))
                 if cmd == "plan":
                     output["source"] = {k: {"hash": v["hash"]} for k, v in output["source"].items()}
             elif cmd == "judge":
@@ -256,7 +307,57 @@ def main(argv=None, *, entrypoint=None):
                 output = bench_report.report(args.run, args.judgments)
             print(json.dumps(output, ensure_ascii=False, indent=2))
             return 3 if output.get("verdict") == "inconclusive" else 1 if output.get("passed") is False else 0
-        knowledge = KnowledgeBase(args.knowledge_home)
+        checking = (getattr(args, "check", False) and
+                    (args.command == "delegate" or args.command == "work" and args.work_command == "delegate"))
+        if checking:
+            from .delegation import PreflightKnowledge, dispatch_preflight
+            knowledge = PreflightKnowledge(args.knowledge_home)
+            if args.command == "work":
+                task_id, path = args.task, args.path
+            else:
+                path = repository(project_root(args.root))
+                location = knowledge.attach(path)
+                task_id = knowledge.development_id(location, args.goal)
+            output = dispatch_preflight(knowledge, task_id, read_json(args.input), path, args.recover)
+            print(json.dumps(output, ensure_ascii=False, indent=2))
+            return 0 if output["passed"] else 1
+        knowledge = KnowledgeBase(args.knowledge_home, vault_home=args.vault if args.command == "board" else None)
+        if args.command == "board":
+            if args.board_command == "serve":
+                from .board_ui import serve
+                serve(knowledge,args.port,args.session,args.task,vault_home=args.vault,open_browser=not args.no_open)
+                return 0
+            from .board import Board
+            desk = Board(knowledge,args.vault)
+            if args.board_command == "list":
+                output = desk.list(args.session,args.task,True)
+            else:
+                output = desk.show(args.id,args.kind)
+                if ((args.session and output["record"].get("session_id") != args.session)
+                        or (args.task and (output["record"].get("task_id") if args.kind == "human-request" else output["id"]) != args.task)):
+                    raise LoopError("Document outside board scope")
+            print(json.dumps(output,ensure_ascii=False,indent=2))
+            return 0
+        if args.command == "human":
+            from .human import HumanDesk
+            desk = HumanDesk(knowledge)
+            cmd = args.human_command
+            if cmd == "serve":
+                from .human_ui import serve
+                serve(knowledge, port=args.port, session_id=args.session, task_id=args.task)
+                return 0
+            if cmd == "list":
+                output = desk.list(args.session, args.task, args.include_closed)
+            elif cmd == "show":
+                output = desk.show(args.id)
+            elif cmd == "request":
+                output = desk.create(args.task, read_json(args.input))
+            elif cmd == "respond":
+                output = desk.respond(args.id, read_json(args.input), args.expected_revision)
+            else:
+                output = desk.execute(args.id, args.expected_revision)
+            print(json.dumps(output, ensure_ascii=False, indent=2))
+            return 1 if output.get("status") == "failed" else 0
         if args.command == "orchestration":
             from .orchestration import Orchestration
             orchestration = Orchestration(knowledge)
@@ -267,7 +368,7 @@ def main(argv=None, *, entrypoint=None):
             return 0
         if args.command == "harness":
             harness = Harness(knowledge)
-            output = (harness.on(args.provider, args.session) if args.harness_command == "on"
+            output = (harness.on(args.provider, args.session, args.task) if args.harness_command == "on"
                       else getattr(harness, args.harness_command)(args.session_id))
             base = Path(__file__).resolve().parent.parent
             output["entrypoint"] = str(Path(entrypoint).absolute() if entrypoint else
@@ -317,7 +418,9 @@ def main(argv=None, *, entrypoint=None):
             elif cmd == "finish":
                 output = engine.gate()
             elif cmd in ("block", "abort"):
-                output = getattr(engine, cmd)(args.reason)
+                output = getattr(engine, cmd)(read_json(args.input) if cmd == "block" else args.reason)
+            elif cmd == "retire":
+                output = engine.retire(read_json(args.input))
             elif cmd == "note":
                 output = engine.note(args.kind, args.text, args.evidence)
             else:

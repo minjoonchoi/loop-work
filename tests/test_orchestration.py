@@ -21,10 +21,11 @@ class OrchestrationTests(unittest.TestCase):
         self.root = self.base / "project"
         self.root.mkdir()
         self.kb = KnowledgeBase(self.base / "knowledge")
-        self.session = Harness(self.kb).on("codex")["session_id"]
+        self.session = self.kb.session("codex")["id"]
         self.location = self.kb.attach(self.root)
         self.orchestration = Orchestration(self.kb)
         self.task = self.make_task("task-a")
+        Harness(self.kb).on("codex",self.session,self.task["id"])
 
     def make_task(self, key, session=None, **overrides):
         value = {"id": key, "kind": "planning", "title": "Plan the requested change", "phase": "working",
@@ -110,7 +111,7 @@ class OrchestrationTests(unittest.TestCase):
         before = worker_context(self.kb, other_task["id"])
         self.save()
         self.assertEqual(worker_context(self.kb, other_task["id"]), before)
-        other_session = Harness(self.kb).on("codex")["session_id"]
+        other_session = self.kb.session("codex")["id"]
         foreign = self.make_task("task-c", other_session)
         with self.assertRaisesRegex(LoopError, "belong"):
             self.save(self.payload("input-foreign", foreign["id"]), expected=1)

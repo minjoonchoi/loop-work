@@ -29,11 +29,14 @@ IGNORE_BLOCK = f"""{IGNORE_START}
 {IGNORE_END}
 """
 BLOCK = f"""{START}
-## loop-work conversation binding
+## loop-work task binding
 
-loop-work activates only on explicit skill invocation. Once enabled,
-route EVERY subsequent input through the bound session until explicit off, across goals, task types,
-directories and compaction. Follow the installed loop-work SKILL.md; preserve its
+loop-work board serve opens the local Obsidian-backed board without changing session activation.
+loop-work human retains the local human-decision CLI without changing activation.
+Explicit loop-work <prompt> binds only that task. Route related corrections/status
+and compaction through its binding; completion or abort releases routing. Unrelated
+ordinary requests never start harness work. A bare invocation asks for a task without
+state changes. Follow the installed loop-work SKILL.md; preserve its
 absolute entrypoint, knowledge home and session ID. After user input, worker result
 or compaction, read `orchestration context` for that binding, then only references
 needed for the next action. Explicitly assigned workers/reviewers execute only their supplied
@@ -49,18 +52,23 @@ def managed_files():
         for source in sorted((SOURCE / folder).glob("*")):
             if source.is_file() and source.suffix in (".py", ".md", ".json"):
                 result[f".loop/{folder}/{source.name}"] = source.read_bytes()
-    skill = (SOURCE / "skills/loop-work/SKILL.md").read_text(encoding="utf-8")
-    if not skill.startswith("---\n"):
-        raise LoopError("The loop-work skill needs YAML frontmatter")
-    result[".agents/skills/loop-work/SKILL.md"] = skill.encode()
-    result[".agents/skills/loop-work/agents/openai.yaml"] = (SOURCE / "skills/loop-work/agents/openai.yaml").read_bytes()
-    helper = SOURCE / "skills/loop-work/loop.py"
-    if helper.is_file():
+    for folder in ("human_ui_assets", "board_ui_assets"):
+        assets = SOURCE / "loop_work" / folder
+        for name in ("index.html", "app.js", "style.css"):
+            source = assets / name
+            if assets.is_symlink() or source.is_symlink() or not source.is_file():
+                raise LoopError("Unexpected local UI asset: " + str(source))
+            result[f".loop/loop_work/{folder}/{source.name}"] = source.read_bytes()
+    for name in ("loop-work",):
+        skill = (SOURCE / f"skills/{name}/SKILL.md").read_text(encoding="utf-8")
+        if not skill.startswith("---\n"):
+            raise LoopError(f"The {name} skill needs YAML frontmatter")
+        result[f".agents/skills/{name}/SKILL.md"] = skill.encode()
+        result[f".agents/skills/{name}/agents/openai.yaml"] = (SOURCE / f"skills/{name}/agents/openai.yaml").read_bytes()
         for provider in (".agents", ".claude"):
-            result[f"{provider}/skills/loop-work/loop.py"] = helper.read_bytes()
-    # Keep one shared body; only Claude's explicit-invocation metadata differs.
-    result[".claude/skills/loop-work/SKILL.md"] = skill.replace(
-        "---\n", "---\ndisable-model-invocation: true\n", 1).encode()
+            result[f"{provider}/skills/{name}/loop.py"] = (SOURCE / f"skills/{name}/loop.py").read_bytes()
+        claude = skill.replace("---\n", "---\ndisable-model-invocation: true\n", 1) if name == "loop-work" else skill
+        result[f".claude/skills/{name}/SKILL.md"] = claude.encode()
     return result
 
 
@@ -92,6 +100,17 @@ def install(target):
         manifest_path = destination(root, ".loop/install.json")
         old = read_json(manifest_path) if manifest_path.exists() else {"files": {}}
         managed = managed_files()
+        # Only the previous exact human adapter file names can be retired.
+        # A v1 manifest is never authority to remove other obsolete paths.
+        retired_names = {f"{discovery}/skills/loop-human/{name}" for discovery in (".agents", ".claude")
+                         for name in ("SKILL.md", "loop.py")}
+        retired_names.add(".agents/skills/loop-human/agents/openai.yaml")
+        removals = []
+        for name in sorted((set(old["files"]) & retired_names) - set(managed)):
+            path = destination(root, name)
+            if path.exists() and file_hash(path) != old["files"][name]:
+                raise LoopError(f"Local changes in managed file; preserve/reconcile before install: {name}")
+            removals.append(path)
         writes = {}
         for name, content in managed.items():
             path = destination(root, name)
@@ -123,6 +142,16 @@ def install(target):
                 content = content.rstrip() + ("\n" if content else "") + line + "\n"
         writes[ignore] = content.encode()
         # Preflight all destination paths and edits before the first managed write.
+        for path in removals:
+            if path.exists():
+                path.unlink()
+        for path in sorted({parent for path in removals for parent in path.parents
+                            if parent.name == "loop-human" or parent.name == "agents" and parent.parent.name == "loop-human"},
+                           key=lambda value: len(value.parts), reverse=True):
+            try:
+                path.rmdir()
+            except OSError:
+                pass  # Unowned additional files/directories are preserved.
         for path, data in writes.items():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
@@ -247,6 +276,16 @@ def _read_link_manifest(root, scope, manifest_path):
         adapter = base + "/adapters/" + provider
         expected_links.update({adapter + "/loop.py": "../../loop.py", adapter + "/rules": "../../runtime/rules",
                                discovery + f"/skills/{brand}": str(root / adapter)})
+    # Accept the original exact v2 layout as well as the expanded human desk
+    # layout. Partial/malicious ownership claims remain invalid.
+    if brand == "loop-work" and ".agents/skills/loop-human" in old["links"]:
+        for provider, discovery in (("codex", ".agents"), ("claude", ".claude")):
+            adapter = base + "/adapters/" + provider + "-human"
+            expected_files.add(adapter + "/SKILL.md")
+            if provider == "codex":
+                expected_files.add(adapter + "/agents/openai.yaml")
+            expected_links[adapter + "/loop.py"] = "../../loop.py"
+            expected_links[discovery + "/skills/loop-human"] = str(root / adapter)
     if scope == "project":
         expected_links[".loop/loop.py"] = "install/loop.py"
     blocks = {"AGENTS.md", "CLAUDE.md", ".gitignore"} if scope == "project" else set()
@@ -329,7 +368,7 @@ def _reject_legacy_install(root, scope):
                         "Copied/unowned installations need manual reconciliation; records are preserved.")
 
 
-def _install_links(home=None, target=None):
+def _install_links(home=None, target=None, *, check_only=False):
     root, scope, manifest_name = _location(home, target)
     _reject_legacy_install(root, scope)
     manifest_path = _safe_path(root, manifest_name)
@@ -352,7 +391,10 @@ def _install_links(home=None, target=None):
         for name in ("AGENTS.md", "CLAUDE.md", ".gitignore"):
             content, blocks[name] = _entry_content(root, name, old, True)
             writes[root / name] = content.encode()
-    directories = set(old.get("directories", [])) if old else set()
+    resources = set(files) | set(links) | {manifest_name}
+    previous_directories = set(old.get("directories", [])) if old else set()
+    directories = {name for name in previous_directories
+                   if any((root / resource).is_relative_to(root / name) for resource in resources)}
     for path in [*writes, *[root / name for name in links], manifest_path]:
         for parent in path.parents:
             if parent == root:
@@ -360,6 +402,20 @@ def _install_links(home=None, target=None):
             if not parent.exists():
                 directories.add(str(parent.relative_to(root)))
     # Every ownership/path conflict above is checked before the first mutation.
+    if check_only:
+        return manifest_path.parent
+    if old:
+        for name in sorted((set(old["links"]) - set(links)) | (set(old["files"]) - set(files))):
+            path = root / name
+            if _present(path):
+                path.unlink()
+        for name in sorted(previous_directories - directories, key=lambda value: len(Path(value).parts), reverse=True):
+            path = root / name
+            if path.is_dir():
+                try:
+                    path.rmdir()
+                except OSError:
+                    pass  # User files keep their former managed parent.
     for path, data in writes.items():
         if not path.exists() or path.read_bytes() != data:
             _write_preserving_mode(path, data.decode())
@@ -436,6 +492,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", type=Path, help="Project directory (without --link, retain the copied installer)")
     parser.add_argument("--home", type=Path, help="Override home for user-scope link installs and tests")
+    parser.add_argument("--workspace", action="store_true", help="Explicitly check/install Obsidian and initialize ~/.loop-work (link install only)")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--link", action="store_true", help="Install discovery links (default scope: user)")
     modes.add_argument("--uninstall", action="store_true", help="Remove only resources owned by a link installation")
@@ -445,6 +502,20 @@ def main(argv=None):
         target = args.target
         if (args.link or args.uninstall or args.uninstall_legacy) and target is None and os.environ.get("LOOP_INSTALL_TARGET"):
             target = Path(os.environ["LOOP_INSTALL_TARGET"])
+        if args.workspace:
+            if not args.link or args.uninstall or args.uninstall_legacy:
+                raise LoopError("--workspace is only valid with --link installation; uninstall preserves the app, vault and data")
+            # Check every link destination before any app/workspace mutation.
+            scope_root, _, _ = _location(args.home, target)
+            with _installation_lock(scope_root):
+                _install_links(args.home, target, check_only=True)
+            from scripts.setup_workspace import bootstrap
+            setup = bootstrap(args.home)
+            print("Workspace ready at " + setup["root"] + "; Obsidian: " + setup["obsidian"])
+            print(setup["next"])
+            if setup.get("vault_sync", {}).get("errors"):
+                print("Vault backfill warning (" + setup["vault_sync"]["status"] + "): " +
+                      str(setup["vault_sync"]["errors"]) + "; existing knowledge and user notes were preserved.", file=sys.stderr)
         if args.uninstall or args.uninstall_legacy:
             root = uninstall_links(args.home, target, legacy=args.uninstall_legacy)
             brand = "loop-dev" if args.uninstall_legacy else "loop-work"
@@ -456,7 +527,7 @@ def main(argv=None):
             if args.home is not None:
                 raise LoopError("--home applies only to link installation; use --link with --target")
             root = install(target)
-            print(f"Installed loop-work into {root}. Start with /loop-work in Claude Code or $loop-work in Codex; the whole conversation then uses the harness.")
+            print(f"Installed loop-work into {root}. Start with /loop-work <task> in Claude Code or $loop-work <task> in Codex; only that task uses the harness.")
         return 0
     except (LoopError, OSError, ValueError) as exc:
         print(f"Install failed: {exc}", file=sys.stderr)

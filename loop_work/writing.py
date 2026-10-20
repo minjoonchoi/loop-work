@@ -44,10 +44,10 @@ def plain(value):
     return re.sub(r"([\\`*_{}\[\]()#+!|])", r"\\\1", value)
 
 
-def bullets(items, maximum=5):
+def bullets(items, maximum=5, language=None):
     lines = ["- " + plain(item) for item in items[:maximum]]
     if len(items) > maximum:
-        lines.append(f"- +{len(items) - maximum} more in the linked JSON record.")
+        lines.append(f"- 연결된 JSON 기록에 {len(items) - maximum}개 항목이 더 있습니다." if language == "ko" else f"- +{len(items) - maximum} more in the linked JSON record.")
     return lines
 
 
@@ -57,7 +57,9 @@ def task_summary(task):
             "result": {k: result[k] for k in ("summary", "gate", "historical", "evidence_current") if k in result}}
 
 
-def task_document(task):
+def task_document(task, language=None):
+    if language == "ko":
+        return _korean_document("task", task)
     goal = task.get("goal") or {}
     result = task.get("result") or {}
     development = task["kind"] == "development"
@@ -111,7 +113,9 @@ def task_document(task):
     return "\n".join(lines)
 
 
-def delegation_document(record):
+def delegation_document(record, language=None):
+    if language == "ko":
+        return _korean_document("delegation", record)
     request = record["request"]
     lines = [f"# {plain(request['id'])}", "", plain(record["summary"]), "",
              f"**State:** {plain(record['status'])} · **Worker:** {plain(record['provider'])} · **Attempt:** {record['attempts']}",
@@ -131,7 +135,9 @@ def delegation_document(record):
     return "\n".join(lines)
 
 
-def topic_document(topic):
+def topic_document(topic, language=None):
+    if language == "ko":
+        return _korean_document("topic", topic)
     lines = [f"# {plain(topic['id'])}", "", plain(topic["summary"]), "",
              f"**Status:** {plain(topic['status'])} · **Scope:** {plain(topic['scope'])} · **Kind:** {plain(topic['kind'])}"]
     for label, key in (("Why it matters", "why"), ("Uncertainty", "uncertainty"), ("Applies to", "applies_to"),
@@ -155,7 +161,7 @@ def context_document(context):
              "Use current evidence within its recorded scope. Past results do not verify today's files."]
     activation = context.get("harness")
     if activation:
-        state = "on · all inputs in this conversation" if activation["enabled"] else "off"
+        state = "on · related inputs for task " + str(activation.get("task_id")) if activation["enabled"] else "off"
         lines.extend(["", f"**Harness:** {state} · session `{plain(activation['session_id'])}`"])
     for key, label in (("reusable", "Current"), ("stale", "Recheck before reuse"),
                        ("unconfirmed", "Drafts and hypotheses"), ("tasks", "Work history")):
@@ -174,3 +180,78 @@ def context_document(context):
             lines.append(f"- {remaining} records outside this view; use knowledge context --query or --offset. Nothing is deleted.")
     lines.extend(["", f"**Revision:** {context['revision']}", "", "[Structured view](./" + context["view_id"] + ".json)", ""])
     return "\n".join(lines)
+
+
+_KO_STATE = {"goal_setting":"목표 설정", "working":"진행 중", "completed":"완료", "blocked":"장애로 중단", "aborted":"종료", "confirmed":"확인됨", "draft":"초안", "hypothesis":"가설", "superseded":"대체됨", "done":"수용 완료", "candidate":"검토 대기", "rejected":"수정 필요", "interrupted":"중단됨", "pending":"대기", "draft":"초안", "plan":"계획", "ready":"실행 준비", "running":"실행 중", "answered":"응답됨", "declined":"거절됨", "executed":"실행됨", "failed":"실패"}
+
+
+def _korean_document(kind, value):
+    """Translate generated labels only, never user text or authoritative values."""
+    def ko_bullets(items):
+        return bullets(items, language='ko')
+    title = value.get('title') or value.get('summary') or value.get('request', {}).get('instruction') or value['id']
+    state = value.get('phase', value.get('status', ''))
+    state_label = '사용자 중단' if value.get('user_cancelled') and state == 'interrupted' else _KO_STATE.get(state, state)
+    lines = ['# ' + plain(title), '', '**상태:** ' + plain(state_label), '', '**기록 ID:** ' + plain(value['id'])]
+    if kind == 'task':
+        kind_labels = {'development':'개발','document':'문서','explanation':'설명','review':'검토','research':'조사','analysis':'분석','planning':'계획'}
+        lines += ['', '**작업 유형:** ' + plain(kind_labels.get(value.get('kind'), value.get('kind','')))]
+        if value.get('execution_phase'):
+            lines += ['', '**개발 단계:** ' + plain(_KO_STATE.get(value['execution_phase'], value['execution_phase']))]
+        if value.get('progress'):
+            lines += ['', '**진행:** ' + plain(value['progress'])]
+        goal = value.get('goal') or {}
+        outcome = (goal.get('target') or {}).get('outcome') if value.get('kind') == 'development' else goal.get('outcome')
+        if outcome:
+            lines += ['', '## 목표', '', plain(outcome)]
+        result = value.get('result') or {}
+        if result.get('evidence_current') is False:
+            lines += ['', '**근거 주의:** 이전 완료 기록은 현재 소스나 규칙에 대한 최신 검증이 아닙니다.']
+        for label, text in [('결과', result.get('summary')), ('장애', value.get('reason')), ('다음 행동', value.get('next_action'))]:
+            if text:
+                lines += ['', '**' + label + ':** ' + plain(text)]
+        checks = result.get('checks') or (value.get('last_result') or {}).get('checks', [])
+        if checks:
+            lines += ['', '## 완료 기준 확인', '', *ko_bullets([str(c['criterion_id']) + ': ' + ('충족' if c['satisfied'] else '미충족') + ' — ' + str(c['evidence']) for c in checks])]
+        if value.get('phase') == 'completed':
+            lines += ['', '**완료 해석:** 기록된 완료입니다. 후속 요청에서는 현재 근거를 다시 확인해야 합니다.']
+        if value.get('notes'):
+            note = value['notes'][-1]
+            lines += ['', '**최근 발견:** ' + plain(note.get('text','')), '', '**출처:** ' + plain(note.get('evidence',''))]
+        if not value.get('next_action') and value.get('phase') in ('goal_setting','working','blocked'):
+            next_steps = {'goal_setting':'남은 선택을 해결하고 완료 기준을 정하세요.', 'working':'정해진 범위의 작업을 위임하고 산출물과 완료 기준을 확인하세요.', 'blocked':'합의된 권한 안에서 기록된 장애를 해결한 뒤 재개하세요.'}
+            lines += ['', '**다음 행동:** ' + next_steps[value['phase']]]
+        if value.get('delegations'):
+            lines += ['', '## 위임 작업', '', *ko_bullets([x['assignment_id'] + ': ' + _KO_STATE.get(x['status'], x['status']) + ' — ' + (x.get('error') or x.get('summary') or '') for x in value['delegations']])]
+        refs = result.get('outputs', []) + ([result['gate']] if result.get('gate') else [])
+        if refs:
+            lines += ['', '## 근거와 산출물', '', *ko_bullets(refs)]
+    elif kind == 'topic':
+        scopes = {'global':'전역','project':'프로젝트','checkout':'체크아웃','session':'세션','task':'작업'}
+        kinds = {'fact':'사실','decision':'결정','artifact':'산출물','finding':'발견'}
+        lines += ['', '**적용 범위:** ' + plain(scopes.get(value.get('scope'), value.get('scope',''))), '', '**지식 유형:** ' + plain(kinds.get(value.get('kind'), value.get('kind','')))]
+        for label, key in [('의미', 'why'), ('불확실성', 'uncertainty'), ('적용 대상', 'applies_to'), ('판단 근거', 'basis')]:
+            if value.get(key):
+                lines += ['', '**' + label + ':** ' + plain(value[key])]
+        for label, key in [('세부 내용', 'details'), ('근거', 'evidence')]:
+            if value.get(key):
+                lines += ['', '## ' + label, '', *ko_bullets(value[key])]
+        lines += ['', '**기록 시각:** ' + plain(value.get('recorded_at',''))]
+        lines += ['', '확인됨 상태만으로 현재 적용 가능성을 보장하지 않습니다. 지식 문맥의 최신성 판정을 확인하세요.']
+    else:
+        request = value['request']
+        lines += ['', '**작업자:** ' + plain(value.get('provider','')), '', '**시도:** ' + plain(value.get('attempts','')), '', '**작업 디렉터리:** ' + plain(value.get('root',''))]
+        if value.get('summary'):
+            lines += ['', '**요약:** ' + plain(value['summary'])]
+        if value.get('error'):
+            lines += ['', '**장애:** ' + plain(value['error'])]
+        lines += ['', '**근거 디렉터리:** ' + plain(value.get('directory',''))]
+        lines += ['', '## 적용된 수정', '', *(ko_bullets(value.get('applied',[])) or ['없음.'])]
+        lines += ['', '## 작업 지시', '', plain(request['instruction'])]
+        for label, key in [('읽기 범위','read_paths'), ('허용된 수정','write_paths'), ('금지 사항','prohibited')]:
+            lines += ['', '## ' + label, '', *(ko_bullets(request.get(key, [])) or ['없음.'])]
+        for label, key in [('산출물','deliverables'), ('완료 기준','criteria')]:
+            lines += ['', '## ' + label, '', *ko_bullets([x['id'] + ': ' + x['description'] for x in request.get(key, [])])]
+        lines += ['', '수용 완료는 이 위임 작업에만 적용됩니다. 상위 작업의 완료 판정과 품질 검증을 대신하지 않습니다.']
+    lines += ['', '[전체 기록](' + value['id'] + '.json)', '']
+    return '\n'.join(lines)

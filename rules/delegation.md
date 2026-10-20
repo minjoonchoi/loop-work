@@ -10,7 +10,8 @@ evidence only to resolve a specific finding, failure or completion question.
 
 ## Prepare one assignment
 
-Use `assignment.example.json`. Populate every field; never send "handle the rest",
+Use `assignment.example.json` for the unchanged legacy contract, or explicitly opt
+into `assignment-v2.example.json`. Populate every field; never send "handle the rest",
 "make it work" or the full conversation as an implicit assignment.
 Apply `routing.md` before splitting work or selecting its model/effort.
 
@@ -39,6 +40,15 @@ Before each handoff, check that its purpose, files, deliverables and criteria ag
 with the parent goal. Keep one complete contribution together; split only when
 outputs can be verified separately and handoffs serve a real dependency. A valid
 JSON object is not proof of a sensible assignment.
+Trace each assigned requirement to the original input or current parent criterion.
+Preserve input constraints, return values, data types and structure, error behavior,
+and existing-data preservation. A serialized output line is not its decoded value.
+Do not replace a specified return value with persistence alone. Check these meanings
+before dispatch and again against actual output before accepting the result.
+If the scope and expected behavior are already clear, include needed inspection in
+the implementation/writing unit; do not require separate investigation and planning
+deliverables for the same contribution. Supply discovered test paths or a scoped
+inventory/absence reference when requesting existing-test coverage.
 Do not include unrelated context. If the relevant read set is unknown, assign a
 bounded analysis first and use its evidence to create the next assignment.
 
@@ -48,6 +58,30 @@ bounded analysis first and use its evidence to create the next assignment.
 python3 "$ENTRYPOINT" --knowledge-home "$KNOWLEDGE_HOME" --root "$PROJECT_ROOT" delegate GOAL --input "$PROJECT_ROOT/.loop/state/assignment.json"
 python3 "$ENTRYPOINT" --knowledge-home "$KNOWLEDGE_HOME" work delegate TASK --input /temporary/assignment.json --path "$PROJECT_ROOT"
 ```
+
+Add `--check` to either delegate command for a read-only setup check before a
+dispatch. It shares actual dispatch validation, including parent/runtime freshness,
+feedback, routing, retained candidate/recovery rules and finite budgets. It calls no
+provider and changes no task, attempt, budget or derived view. `action: reuse` means
+the existing candidate/completed assignment would be returned, not a new call.
+`passed: true` establishes only that current setup permits that action; actual
+dispatch rechecks inputs and still requires assessment and completion.
+On failure inspect the structured diagnostic and its remediation before continuing.
+
+An existing `read_paths` file must be visible. Absent declared paths produce
+`missing_read` warnings because the assignment may intentionally inspect absence.
+Decide whether each missing input is required before dispatch; the runtime cannot
+infer that meaning from a path. An existing directory ending in `/` can also scope
+absence checks without permitting unrelated reads.
+Include needed public entrypoint and settings definitions. For a compiler repair,
+supply actual dependency/classpath facts and the latest exact compiler diagnostic in
+permitted source scope or supplied notes; an ignored log reference alone grants no
+read permission. This does not require compiling unrelated or non-code tasks.
+
+Run dependent commands only after the preceding command exits successfully. A failed
+`note`, validation or seal check must stop the dependent dispatch. Execution `note`
+requires a running goal; in draft use permitted discovery/contract inputs and
+then review/freeze/start. Never edit parent inputs while a worker is running.
 
 The orchestrator creates the JSON and runs these commands; the user supplies neither.
 A common task with several directories requires an explicit `--path` for each
@@ -107,6 +141,58 @@ results and artifact references; full outputs, logs and message history stay on 
 
 ## Stage, assess and continue
 
+### Opt-in version 2
+
+Version 2 requires `schema_version: 2`, `work_unit_id` equal to `id`, a positive
+`request_revision`, `previous_request_hash` (null initially), and `correction_ledger`.
+Every criterion declares `execution_owner` (`worker` or `orchestrator`) and
+`verification_mode` (`source_inspection`, `candidate_test`, or `orchestrator_receipt`).
+Orchestrator-owned criteria use `orchestrator_receipt`. Portable workers have no
+candidate-test execution capability, including implementation workers; `candidate_test`
+is currently rejected. Use worker `source_inspection` and root receipts instead.
+Return `schema_version: 2` in its
+result; worker coverage uses booleans and must be true for `done`, while root-owned
+coverage must be null, meaning pending. This readies a candidate only. Acceptance
+still requires every assigned and linked goal check true with independently checked
+external pinned evidence; worker pending never completes root verification.
+
+Use `assessment-v2.example.json`. Accept has `rejection: null`; reject declares
+`rejection.origin` and `strategy`. Proven worker-output failures escalate. An assessed
+assignment-input or orchestrator-fixture fault allows only
+`repair_contract_same_profile`: submit the next same-ID revision linked to the exact
+previous request's canonical JSON digest. Revisions preserve criteria descriptions,
+deliverables, writes, dependencies, prohibitions and recorded demand (stricter
+prohibitions or higher demand are allowed). Public read scope/instruction and mistaken
+execution responsibility can be repaired; acceptance cannot be weakened. Repeating
+the unrepaired request is blocked. Provider failures and stale evidence are not
+assessable output rejections; follow their setup/recovery path. Mechanical
+`invalid_result` rejection requires worker-output origin. Historical legacy origins
+stay `unknown`; do not retroactively attribute them.
+
+All revisions retain one unit's three-attempt cap and the parent calls/time/deadline.
+The retained profile must meet every revised demand dimension; otherwise repair
+blocks before consuming a call/attempt, without automatic escalation or lower demand.
+Exact contribution signatures compare same-task/location current and historical
+requests, rejecting a renamed duplicate unit. This catches exact normalized
+kind/read/write/deliverable/criterion contributions, not arbitrary semantic rewrites.
+New names never authorize retry-budget resets. Teams support v2 revision 1 only;
+mid-team revisions and migration of an existing team unit into standalone repair are
+unsupported and rejected. Preserve its blocker/history rather than inventing a new
+team to reset attempts.
+
+The cumulative correction ledger retains immutable rows, exact expected/observed
+values, criterion, origin, source ref/pin, validation owner and resolution status.
+Append an explicit same-criterion superseding row to resolve a correction and retain
+the old row. Source references grant no additional read authority or permission to
+reuse rejected content. Version 2 may also propose `operation: patch` with exact
+mode-aware `base_hash`, `result_hash` and nonoverlapping UTF-8 byte `edits` ranges.
+Patch bases must exist in the dispatch snapshot. Use `write` for an authorized new
+file. A patch against an absent dispatch base is invalid output; actual disappearance
+or unreadability of a previously pinned base remains an evidence/setup failure.
+All patch results are materialized and validated before any source write, then use
+the existing assessment/apply path. This does not guarantee crash atomicity across
+multiple files. Legacy whole-file changes and strict unknown-field rejection remain.
+
 Workers use authenticated Claude Code/Codex read-only CLI calls. They return named
 outputs, evidence for every criterion, optional proposed UTF-8 file changes, focused
 findings and blockers. Each proposed edit names its operation and original file hash.
@@ -120,6 +206,10 @@ A valid model-returned blocker keeps `status: blocked` and carries candidate ide
 result pins and `model_reported_blocker: true`. Independently check its claim against
 the available inputs. If evidence disproves it, use the same `assess` schema to reject
 the unsupported claim and retry the same assignment/team on a stronger allowed profile.
+For a claimed hash mismatch, recompute the supplied pin with the recorded
+`file_pin_format`, including the executable flag; raw-byte SHA-256 is not that pin.
+Check actual files and dispatch evidence before calling the claim source drift.
+Never replace the supplied pin with the model's hash or bypass freshness checks.
 It cannot be accepted as done. A verified real blocker stays blocked; an ordinary
 retry retains its profile. Actual CLI/authentication/timeout/source-drift failures
 have no assessable candidate and do not authorize escalation.
@@ -194,7 +284,8 @@ existing delivery authority; a worker result never grants it.
 
 ## Reuse and recovery
 
-An assignment ID is immutable and bound to one working location. Change its root,
+An assignment ID is bound to one working location. The legacy request is immutable.
+Version 2 permits only the linked input/fixture repair described above. Otherwise change its root,
 instruction or scope only under a new ID
 and within the parent's authority. Identical completed assignments reuse their result
 only while parent and observed source remain identical. Prerequisites must still
@@ -205,6 +296,9 @@ Each assignment has at most three attempts, including higher-profile retries and
 team turns. The task also has a shared call budget;
 new IDs or resume do not reset it. Calls have timeouts and working tasks have an
 elapsed-time budget. Parent-goal clarification time is not counted as work time.
+Resolve required preflight assignments before starting development. Do not leave a
+required `goal_setting` unit blocked and later try to rerun it after start. If its
+inputs cannot be supplied, preserve the preflight blocker instead of starting.
 Inspect failed logs before retrying. An interrupted worker requires `--recover REASON`
 after inspecting logs and terminating any surviving process. Do not erase history.
 

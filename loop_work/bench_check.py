@@ -12,21 +12,21 @@ from .storage import LoopError, file_hash, write_json
 
 def check(models, efforts, *, candidate=None, suite=None, providers=None,
           repeats=3, seed=0, environment=None, output=None, judge_provider='codex', judge_model=None,
-          judge_effort=None, judge_repeats=2, dry_run=False, executables=None, history=None, routing_profile=None):
+          judge_effort=None, judge_repeats=2, dry_run=False, executables=None, history=None, routing_profile=None, trial_plan=None):
     source = Path(__file__).resolve().parent.parent
     candidate = Path(candidate or source).resolve()
     suite = Path(suite or source / 'benchmarks/suite.json').resolve()
-    providers = ['claude', 'codex'] if providers is None else providers
+    providers = sorted(models) if providers is None else providers
     environment = environment or (platform.system() + ' / ' + platform.machine() + '; current CLI host profile')
     if judge_provider not in models:
         raise LoopError('Select Claude or Codex as the common judge')
     evaluation = {'provider': judge_provider, 'model': models[judge_provider] if judge_model is None else judge_model,
                   'effort': efforts.get(judge_provider) if judge_effort is None else judge_effort, 'repeats': judge_repeats}
-    spec = benchmark.prepare(suite, candidate, models, providers, repeats, seed, environment, efforts, evaluation,
-                             routing_profile)
-    spec['source'] = {k: {'hash': v['hash']} for k, v in spec['source'].items()}
     output = Path(output).resolve() if output else candidate.parent / 'loop-work-benchmarks' / (
         datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid.uuid4().hex[:8])
+    spec = benchmark.prepare(suite, candidate, models, providers, repeats, seed, environment, efforts, evaluation,
+                             routing_profile, trial_plan, output)
+    spec['source'] = {k: {'hash': v['hash']} for k, v in spec['source'].items()}
     if output.exists() or output.is_relative_to(candidate) or output.is_relative_to(suite.parent):
         raise LoopError('Use a new benchmark output directory outside source/suite trees')
     history = bench_evolution.location(candidate, history)
@@ -63,7 +63,9 @@ def check(models, efforts, *, candidate=None, suite=None, providers=None,
         # An unjudged run is normally inconclusive; its verdict must not stop judging.
         benchmark.run(suite, candidate, models, providers, repeats, seed, environment,
                       output, executables=executables, efforts=efforts, evaluation=evaluation,
-                      routing_profile=spec['routing']['policy'] if spec['routing']['mode'] == 'adaptive' else None)
+                      routing_profile=spec['routing']['policy'] if spec['routing']['mode'] == 'adaptive' else None,
+                      trial_plan=trial_plan,
+                      trial_plan_hash=spec['trial_plan']['file_hash'] if trial_plan is not None else None)
         phase = 'judge'
         bench_report.judge(output, judge_provider, evaluation['model'], judge_repeats, effort=evaluation['effort'])
         phase = 'gate'

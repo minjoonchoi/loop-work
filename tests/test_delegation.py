@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -74,6 +75,27 @@ class DelegationTests(ProjectTest):
     def accepted_work(self, work, task_id, request, path=None):
         return accept_fixture(self.kb, lambda payload: work.assess(task_id, payload, path),
                               work.delegate(task_id, request, path))
+
+    def test_worker_pin_recipe_matches_real_content_and_mode_and_preserves_drift_detection(self):
+        result = self.accepted(assignment())
+        packet = self.packet(result)
+        self.assertEqual(packet["file_pin_format"]["algorithm"], "loop_work.storage.file_hash/v1")
+        path = self.root / "value.py"
+        recipe = packet["file_pin_format"]["recompute"].split(": ", 1)[1]
+        # Evaluate the exact supplied stdlib recipe, rather than a test-only copy.
+        recomputed = eval(recipe, {"hashlib": hashlib, "json": json, "path": path})
+        self.assertEqual(recomputed, packet["files"]["value.py"])
+        self.assertNotEqual(recomputed, hashlib.sha256(path.read_bytes()).hexdigest())
+        original_mode = path.stat().st_mode
+        path.chmod(original_mode ^ 0o100)
+        self.assertNotEqual(eval(recipe, {"hashlib": hashlib, "json": json, "path": path}), recomputed)
+        self.assertNotEqual(file_hash(path), recomputed)
+        path.chmod(original_mode)
+        path.write_text(path.read_text() + "# changed input\n")
+        self.assertNotEqual(file_hash(path), recomputed)
+        prompt = (Path(result["assignment"]["directory"]) / "prompt.txt").read_text()
+        self.assertIn("error behavior and existing-data preservation", prompt)
+        self.assertIn("raw-content hash difference alone is not source drift", prompt)
 
     def test_read_only_analysis_reuses_result_and_saves_draft_findings(self):
         request = assignment()

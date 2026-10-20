@@ -23,16 +23,32 @@ def completion_feedback(knowledge, task_id, expected_revision=None, require_work
         with knowledge.connection() as connection:
             connection.execute("BEGIN")
             return completion_feedback(knowledge, task_id, expected_revision, require_worker, connection)
+    workers = [json.loads(row[0]) for row in db.execute("SELECT body FROM records WHERE kind='delegation'")]
+    workers = [item for item in workers if item.get("task_id") == task_id]
+    if workers:
+        from .delegation import Delegation, PreflightKnowledge
+        # Retained pin validation is pure file reading. Reuse the caller's
+        # transaction even for location lookup; Delegation's normal attach must
+        # never open a writer while completion already holds BEGIN IMMEDIATE.
+        class TransactionEvidence(PreflightKnowledge):
+            def connection(self):
+                return nullcontext(db)
+        readonly = TransactionEvidence(knowledge.home)
+        task = readonly.get("task", task_id)
+        location = readonly.get("location", task["locations"][0])
+        validator = Delegation(readonly, task_id, Path(location["root"]))
+        for retained in workers:
+            validator.validate_retained_evidence(retained)
     feedback = worker_context(knowledge, task_id, db=db)
     if expected_revision is not None and feedback["revision"] != expected_revision:
         raise LoopError("User feedback changed during review or completion; restore context and verify again")
     if feedback["blocked"]:
         raise LoopError(feedback["block_reason"] or "User feedback blocks this task")
-    workers = [json.loads(row[0]) for row in db.execute("SELECT body FROM records WHERE kind='delegation'")]
-    workers = [item for item in workers if item.get("task_id") == task_id]
     if require_worker:
+        from .retirement import is_retired
         unresolved = sorted(item.get("request", {}).get("id", item["id"])
-                            for item in workers if item.get("status") != "done")
+                            for item in workers if item.get("status") != "done"
+                            and not is_retired(knowledge, task_id, item, db))
         if unresolved:
             raise LoopError("Required worker assignments remain unresolved; assess or retry before completion: "
                             + ", ".join(unresolved[:5]))
@@ -84,9 +100,11 @@ class Work:
     def locations(self, task):
         return [self.knowledge.get("location", key) for key in task["locations"]]
 
-    def save(self, task, topics=(), feedback_revision=None, require_worker=False):
+    def save(self, task, topics=(), feedback_revision=None, require_worker=False, authority_check=None):
         with self.knowledge.connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            if authority_check is not None:
+                authority_check(db)
             row = db.execute("SELECT body FROM records WHERE kind='task' AND id=?", (task["id"],)).fetchone()
             if not row or json.loads(row[0])["version_token"] != task["version_token"]:
                 raise LoopError("Task changed concurrently; restore its latest context")
@@ -185,6 +203,9 @@ class Work:
         task = self.load(task_id)
         if task["phase"] != "working" or digest(task["goal"]) != task["goal_seal"]:
             raise LoopError("Only work on an unchanged, started goal can finish")
+        from .harness import cancellation_probe
+        from .process import Cancelled
+        cancel=cancellation_probe(self.knowledge,task_id)
         feedback = completion_feedback(self.knowledge, task_id, require_worker=True)
         if (not isinstance(result, dict) or not isinstance(result.get("summary"), str) or not result["summary"].strip()
                 or not isinstance(result.get("outputs"), list) or not result["outputs"]
@@ -217,7 +238,11 @@ class Work:
         task.update(phase="completed", completed_at=now(), result={**result, "historical": True,
                     "feedback_revision": feedback["revision"], "feedback_substantive_revision": feedback["substantive_revision"]},
                     completion_observation=digest(observations))
-        self.save(task, topics, feedback_revision=feedback["revision"], require_worker=True)
+        def authority(db):
+            reason=cancel(db=db)
+            if reason:
+                raise Cancelled(str(reason))
+        self.save(task, topics, feedback_revision=feedback["revision"], require_worker=True, authority_check=authority)
         return {"passed": True, **self.context(task_id)}
 
     def note(self, task_id, text, evidence):
@@ -231,7 +256,7 @@ class Work:
         self.save(task)
         return self.context(task_id)
 
-    def stop(self, task_id, reason, abort=False):
+    def _stop_internal(self, task_id, reason, abort=False):
         task = self.load(task_id)
         if task["phase"] in ("completed", "aborted") or not reason.strip():
             raise LoopError("Only unfinished work can be stopped with a reason")
@@ -241,16 +266,47 @@ class Work:
         self.save(task)
         return self.context(task_id)
 
-    def resume(self, task_id):
+    def stop(self, task_id, payload, abort=False):
+        if abort:
+            return self._stop_internal(task_id, payload, abort=True)
+        from .blocking import validate_block
+        from .orchestration import worker_context
+        task = self.load(task_id)
+        if task["phase"] in ("completed", "aborted"):
+            raise LoopError("Only unfinished work can be stopped")
+        proof = validate_block(payload, self.knowledge, task, task,
+                               (task.get("goal") or {}).get("execution", task.get("preflight_execution", {})),
+                               worker_context(self.knowledge, task_id))
+        task["block_proof"] = proof
+        previous = task.get("previous_phase") if task["phase"] == "blocked" else task["phase"]
+        task.update(previous_phase=previous, phase="blocked", reason=proof["reason"])
+        self.save(task)
+        return self.context(task_id)
+
+    def retire(self, task_id, payload):
+        from .retirement import retire
+        task = self.load(task_id, mutable=False)
+        if task["kind"] == "development":
+            from .engine import Engine
+            root = Path(self.locations(task)[0]["root"])
+            with locked(root):
+                return Engine(root, task["goal_id"], self.knowledge).retire(payload)
+        if task.get("goal_seal") and task["goal_seal"] != digest(task["goal"]):
+            raise LoopError("Restore the goal before retiring assignments")
+        return retire(self.knowledge, task_id, payload)
+
+    def resume(self, task_id, *, authority_check=None):
         task = self.load(task_id)
         if task["phase"] != "blocked":
             raise LoopError("Only blocked work can resume")
         if task.get("goal_seal") and task["goal_seal"] != digest(task["goal"]):
             raise LoopError("Restore the goal before resuming")
+        if task.get("block_proof", {}).get("retryable") is False:
+            raise LoopError("This evidence-bearing block is not retryable")
         feedback = completion_feedback(self.knowledge, task_id)
         task["phase"] = task["previous_phase"]
         task.pop("reason", None)
-        self.save(task, feedback_revision=feedback["revision"])
+        self.save(task, feedback_revision=feedback["revision"], authority_check=authority_check)
         return self.context(task_id)
 
     def context(self, task_id):
@@ -272,7 +328,9 @@ class Work:
             "blocked": "Report the actual obstacle; recover within existing authority and resume. Do not ask mid-work questions.",
             "aborted": "Preserve the historical record; do not report success.",
         }
+        from .retirement import summaries
         return {"task": task, "knowledge": context, "delegations": self.knowledge.delegations(task_id),
+                "retirements": summaries(self.knowledge, task_id),
                 "document": str(self.knowledge.home / "views/task" / (task_id + ".md")),
                 "next": instructions.get(task["phase"], "Inspect the saved state")
                 if task["kind"] != "development" else "Use repository context and development gates; knowledge history cannot mark development complete."}

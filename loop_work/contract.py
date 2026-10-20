@@ -47,7 +47,7 @@ def configure_routing(execution, import_environment=False, required=True):
     return execution["routing"]
 
 
-def routing_readiness(execution, worker, development=False):
+def routing_readiness(execution, worker, development=False, review_provider=None):
     """Check configured eligibility without probing credentials or selecting a host default."""
     from .routing import select_profile
     policy = configure_routing(execution)
@@ -57,12 +57,12 @@ def routing_readiness(execution, worker, development=False):
               "evidence": ["execution.routing: preflight policy coverage"]}
     select_profile(policy, worker, demand)
     if development:
-        from .providers import reviewer
-        select_profile(policy, reviewer(worker), demand)
+        from .providers import review_selection
+        select_profile(policy, review_provider or review_selection(worker)["provider"], demand)
     return policy
 
 
-def validate(contract, discovery, root):
+def validate(contract, discovery, root, review_provider=None):
     errors = []
 
     def require(condition, message):
@@ -164,7 +164,7 @@ def validate(contract, discovery, root):
     require(execution.get("orchestrator", execution.get("implementer")) in ("claude", "codex"),
             "orchestrator must be claude or codex")
     try:
-        routing_readiness(dict(execution), execution.get("implementer"), development=True)
+        routing_readiness(dict(execution), execution.get("implementer"), development=True, review_provider=review_provider)
     except LoopError as exc:
         errors.append(str(exc))
     for key, default, maximum in (("max_worker_calls", 40, 200), ("worker_timeout_seconds", 600, 3600)):

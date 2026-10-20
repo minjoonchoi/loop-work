@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from unittest.mock import patch
+from pathlib import Path
 
 from loop_work.contract import validate
 from loop_work.engine import Engine
@@ -11,6 +12,52 @@ from support import ProjectTest
 
 
 class LifecycleTests(ProjectTest):
+    def test_gate_checks_accepted_worker_pins_before_checks_review_or_attempt_spending(self):
+        from loop_work.delegation import Delegation
+        from loop_work.human import HumanDesk
+        from support import fixture_assessment
+        from test_delegation import assignment
+        self.running()
+        kb = self.engine.knowledge
+        task_id = self.engine.refresh()["work_id"]
+        worker = Delegation(kb, task_id, self.root)
+        for human in (False, True):
+            with self.subTest(substantive_human=human):
+                if human:
+                    desk = HumanDesk(kb)
+                    asked = desk.create(task_id, {"id": "gate-choice", "kind": "decision", "title": "Confirm contract",
+                        "question": "Keep the same behavior?", "options": [], "action": None})
+                    desk.respond(asked["id"], {"decision": "answer", "text": "Keep the frozen target."}, 1)
+                request = assignment("gate-unit-" + str(human))
+                value = {"status": "done", "summary": "VALUE is defined in value.py.",
+                    "outputs": [{"id": row["id"], "content": "VALUE equals one.", "evidence": ["value.py:1"]} for row in request["deliverables"]],
+                    "coverage": [{"criterion_id": row["id"], "satisfied": True, "evidence": "value.py:1"} for row in request["criteria"]],
+                    "changes": [], "findings": [], "blockers": []}
+                # Preserve one work unit across the two passes; new input is
+                # consumed on its current source-bound turn after human feedback.
+                request["id"] = "gate-pinned-unit"
+                with patch("loop_work.providers.structured_call", return_value=value):
+                    result = worker.run(request, recover="Consume current human feedback" if human else None)
+                    worker.assess(fixture_assessment(kb, result))
+                record = kb.get("delegation", result["assignment"]["id"])
+                for target in (Path(record["assessment_ref"]), Path(record["directory"]) / "dispatch.json"):
+                    original = target.read_bytes()
+                    if target.name == "dispatch.json":
+                        dispatch = read_json(target)
+                        dispatch["before"]["digest"] = "tampered"
+                        write_json(target, dispatch)
+                    else:
+                        target.write_bytes(original + b" ")
+                    state_before = self.engine.state_path.read_bytes()
+                    budget = kb.get("worker-budget", task_id)
+                    with patch("loop_work.engine.execute", side_effect=AssertionError("must not run checks")), patch("loop_work.providers.review", side_effect=AssertionError("must not review")):
+                        with self.assertRaises(LoopError):
+                            self.engine.gate("M1")
+                    self.assertEqual(self.engine.state_path.read_bytes(), state_before)
+                    self.assertEqual(kb.get("worker-budget", task_id), budget)
+                    target.write_bytes(original)
+        self.assertTrue(self.engine.gate("M1")["passed"])
+
     def test_full_loop_both_directions_and_fresh_final_verification(self):
         for implementer in ("claude", "codex"):
             with self.subTest(implementer=implementer):
@@ -255,10 +302,92 @@ class RejectionTests(ProjectTest):
         contract["checks"][0]["cwd"] = "../outside"
         self.assertTrue(any("escapes" in x for x in validate(contract, discovery, self.root)))
 
+    def test_codex_only_reviews_are_fresh_and_selection_is_pinned(self):
+        availability = patch("loop_work.providers.shutil.which", side_effect=lambda p:
+                             str(self.bin / p) if (self.bin / p).is_file() else None)
+        availability.start()
+        self.addCleanup(availability.stop)
+        (self.bin / "claude").unlink()
+        self.engine = Engine(self.root, "codex-only")
+        self.engine.initialize("Codex-only verification", "codex")
+        self.fill_contract()
+        _, contract, _ = self.engine.load()
+        contract["execution"]["routing"]["profiles"] = [
+            p for p in contract["execution"]["routing"]["profiles"] if p["provider"] == "codex"]
+        # An opposite CLI appearing after preflight must not alter the selected
+        # provider or demand a newly configured opposite profile at freeze/start.
+        write_json(self.engine.goal_dir / "contract.json", contract)
+        self.assertTrue(self.engine.plan_review()["passed"])
+        (self.bin / "claude").write_text((self.bin / "codex").read_text())
+        (self.bin / "claude").chmod(0o700)
+        self.engine.freeze()
+        self.engine.start()
+        selection = self.state()["review_selection"]
+        self.assertEqual(selection["mode"], "same_provider_fresh")
+        first = self.engine.gate("M1")
+        self.assertTrue(first["passed"])
+        self.assertEqual(first["review"]["provider"], "codex")
+        final = self.engine.gate()
+        self.assertTrue(final["passed"])
+        self.assertNotEqual(first["review"]["artifact"], final["review"]["artifact"])
+        self.assertEqual(final["routing"]["review_selection"], selection)
+
+    def test_repeated_preflight_preserves_selection_and_invalidates_prior_approval(self):
+        availability = patch("loop_work.providers.shutil.which", side_effect=lambda p:
+                             str(self.bin / p) if (self.bin / p).is_file() else None)
+        availability.start()
+        self.addCleanup(availability.stop)
+        (self.bin / "codex").unlink()
+        first = self.engine.plan_review()
+        self.assertTrue(first["passed"])
+        selection = self.state()["review_selection"]
+        approval = self.state()["plan_review"]
+        self.assertEqual(selection["mode"], "same_provider_fresh")
+        (self.bin / "codex").write_text((self.bin / "claude").read_text())
+        (self.bin / "codex").chmod(0o700)
+        _, contract, _ = self.engine.load()
+        original = json.loads(json.dumps(contract))
+        contract["target"]["acceptance"] = []
+        write_json(self.engine.goal_dir / "contract.json", contract)
+        with self.assertRaises(LoopError):
+            self.engine.plan_review()
+        self.assertEqual(self.state()["review_selection"], selection)
+        self.assertNotIn("plan_review", self.state())
+        self.assertTrue(read_json(Path(approval))["passed"])
+        write_json(self.engine.goal_dir / "contract.json", original)
+        with self.assertRaisesRegex(LoopError, "Run the live independent"):
+            self.engine.freeze()
+        second = self.engine.plan_review()
+        self.assertTrue(second["passed"])
+        self.assertEqual(second["routing"]["review_selection"], selection)
+        self.assertNotEqual(self.state()["plan_review"], approval)
+        self.engine.freeze()
+
+    def test_freeze_rejects_review_selection_mismatch(self):
+        self.assertTrue(self.engine.plan_review()["passed"])
+        state = self.state()
+        state["review_selection"]["reason"] = "A different selection record"
+        write_json(self.engine.state_path, state)
+        with self.assertRaisesRegex(LoopError, "selection differs"):
+            self.engine.freeze()
+
+    def test_selected_opposite_failure_does_not_fallback(self):
+        self.running()
+        opposite = self.state()["review_selection"]["provider"]
+        (self.bin / opposite).unlink()
+        import shutil
+        original_which = shutil.which
+        with patch("loop_work.providers.shutil.which",
+                   side_effect=lambda p: None if p == opposite else original_which(p)):
+            result = self.engine.gate("M1")
+        self.assertFalse(result["passed"])
+        self.assertIn("Required CLI is not installed", result["error"])
+        self.assertEqual(self.state()["review_selection"]["mode"], "cross_provider")
+
     def test_missing_provider_blocks_plan(self):
         (self.bin / "codex").unlink()
         with patch("loop_work.providers.shutil.which", return_value=None):
-            with self.assertRaisesRegex(LoopError, "Both CLIs"):
+            with self.assertRaisesRegex(LoopError, "Required CLIs"):
                 self.engine.plan_review()
 
     def test_claude_permission_denial_rejected(self):

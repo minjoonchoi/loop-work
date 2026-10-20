@@ -2,7 +2,7 @@
 
 **목표를 말하면 맥락을 복원하고, 작업을 수행하고, 결과를 확인해 기록하는 Claude Code·Codex 공통 하네스**입니다.
 
-스킬을 한 번 시작하면 **해당 대화의 모든 후속 입력**에 하네스를 적용합니다.
+`$loop-work <작업 내용>` 또는 `/loop-work <작업 내용>`으로 **명시한 한 작업**에 하네스를 적용합니다.
 메인 대화는 목표·사용자 피드백·작업 조율·결과 보고에 집중하고, 실제 조사·계획·구현·작성은
 분리된 작업자에게 위임합니다. 작업은 **목표 설정 → 작업**으로 진행합니다. 개발은 구현·테스트·독립 검토·수정을 반복하고,
 문서·설명·조사·계획은 결과를 작성해 완료 조건을 확인합니다. 에이전트가 실행 상태와 로컬 지식을
@@ -10,9 +10,11 @@
 
 ## 시작
 
-공통 환경은 macOS/Linux, Python 3.10+, Git입니다. Windows는 WSL을 사용합니다.
-실제 작업은 로그인된 Claude Code 또는 Codex CLI에 위임합니다. 개발은 독립 검토를 위해
-두 CLI와 대상 Git 저장소가 필요합니다. 문서·설명은 일반 디렉터리에서 작업 CLI 하나로 수행합니다.
+하네스 실행 환경은 macOS/Linux, Python 3.10+, Git입니다. Windows는 WSL을 사용합니다.
+기본 `make install`은 사용자 요청에 따라 Obsidian을 확인하고, 없으면 기존 Homebrew로
+설치한 뒤 `~/.loop-work/vault` 문서 공간을 준비합니다. Python 런타임에는 추가 패키지가 필요 없습니다.
+실제 작업은 로그인된 Claude Code 또는 Codex CLI에 위임합니다. 개발은 대상 Git 저장소와 작업 CLI가 필요합니다. 반대 CLI가 설치돼 있으면 교차 검토하고,
+없으면 같은 제공자의 새 독립 호출로 검토합니다. 선택은 사전 기록하며 호출 실패로 바꾸지 않습니다. 문서·설명은 일반 디렉터리에서 작업 CLI 하나로 수행합니다.
 작업 전에는 에이전트가 사용 가능한 모델·effort와 상대적인 비용·능력 순위를
 `execution.routing`에 설정합니다. 준비된 설정은 `LOOP_ROUTING_PROFILE`로 가져올 수 있습니다.
 계정에서 사용할 모델을 확인하지 않은 채 CLI 기본값으로 실행하지 않습니다.
@@ -26,31 +28,39 @@ make install
 # make TARGET=/absolute/path/to/project install
 ```
 
-대상 디렉터리에서 스킬을 **처음 한 번** 명시적으로 실행합니다. 목표를 같이 적어도 됩니다.
+설치 시 단일 vault 폴더와 `.obsidian`을 준비하며 기존 노트·설정은 덮어쓰지 않습니다.
+앱의 전역 vault 등록·동기화·플러그인 설정은 바꾸지 않습니다. Obsidian에서 이 폴더를 열면 됩니다.
+앱이 없을 때 자동 설치는 기존 Homebrew가 필요하며, Homebrew 자체는 설치하지 않습니다.
+설치가 지원되지 않거나 실패하면 원인을 표시하고 성공으로 처리하지 않습니다. 앱 설치와 vault 준비는
+`make install`의 설치 단계이고, 작업 실행이나 저수준 복사/벤치마크 설치가 brew를 호출하지 않습니다.
+`make uninstall`은 하네스 연결만 해제하며 Obsidian·vault·작업 기록을 보존합니다.
+기존 DB가 있으면 설치 때 문서도 내보냅니다. 노트 충돌·출력 실패는 경고로 구분해 기록하며
+그 이유만으로 스킬 설치를 막지 않습니다. 빈 DB나 새 세션·목표를 자동 생성하는 과정은 아닙니다.
+
+대상 디렉터리에서 작업 내용을 붙여 명시적으로 실행합니다.
 
 | 환경 | 시작 입력 |
 | --- | --- |
 | Claude Code | `/loop-work 메모를 저장하고 조회하는 CLI를 만들어 줘` |
 | Codex | `$loop-work 메모를 저장하고 조회하는 CLI를 만들어 줘` |
 
-이후에는 “저장 방식을 설명해 줘”, “다른 폴더의 README도 고쳐 줘”처럼 평소대로 요청합니다.
-**목표 완료·새 목표·문서나 설명 요청·폴더 이동 후에도 활성화는 유지**됩니다. 진행 질문,
-정정, 작업 중지 요청도 같은 하네스가 해석합니다. 단순 확인·진행 질문은 새 작업을 만들지 않습니다.
-“이 작업 멈춰”는 작업을 멈추고, “하네스 꺼”는 해당 대화의 자동 처리를 끕니다.
-다른 대화에는 자동 적용하지 않습니다. 다시 켜면 같은 대화의 세션과 기록을 이어갑니다.
+이 작업의 진행 질문·관련 정정·맥락 압축은 같은 작업을 이어갑니다. 완료 또는 중단 폐기(abort) 시
+자동 적용을 해제합니다. 이후 무관한 일반 요청에는 하네스를 자동 적용하지 않습니다.
+새 작업은 다시 스킬과 작업 내용을 명시합니다. 진행 중 새 명시 작업도 기존 작업을 조용히 교체하지 않습니다.
+내용 없는 스킬 호출은 작업 내용을 한 번 묻고 세션·목표를 만들지 않습니다.
+일시 중지·blocker는 완료가 아니며 기존 작업·예산을 보존합니다. 진행 확인만으로 재개하지 않습니다.
+`off`는 기존 바인딩의 자동 처리를 해제하는 호환 명령이며 기록·파일·예산은 지우지 않습니다.
 
-| 상황 | 하네스 상태 |
+| 상황 | 하네스 처리 |
 | --- | --- |
-| 새 대화에서 일반 요청 | 비활성 |
-| 스킬 명시적 호출 | 현재 대화 활성화 |
-| 목표 완료·새 요청·종류/경로 변경·맥락 압축 | 활성 유지 |
-| 작업 일시 중지 | 활성 유지; 요청한 작업은 중지 |
-| 명시적 하네스 종료 | 비활성; 목표·지식·실행 예산 보존 |
+| 일반 요청 또는 완료 후 무관한 새 요청 | 자동 적용 없음 |
+| 스킬과 작업 내용 명시 | 해당 한 작업에 결속 |
+| 진행 중 관련 정정·상태 확인·경로 이동·맥락 압축 | 같은 작업 유지 |
+| 완료·abort | 자동 결속 해제, 기록·예산 보존 |
+| board/human 명령 | 기존 작업·활성 상태를 바꾸지 않는 관리 명령 |
 
-설치된 스킬과 진입 규칙을 따르는 대화 모델이 **의도와 명시적인 제한**으로 요청을 분류합니다.
-로컬 세션 상태를 매 입력마다 확인하며, 메시지를 가로채는 전역 훅이나 키워드 파서는 없습니다.
-Claude는 `disable-model-invocation: true`, Codex는 `allow_implicit_invocation: false`로
-최초 자동 호출을 끕니다. 이 설정은 활성화 이후의 대화 규칙을 해제하지 않습니다.
+Claude `disable-model-invocation: true`, Codex `allow_implicit_invocation: false`를 유지합니다.
+호스트가 관련성에 따라 분류하며 전역 훅이나 키워드 파서가 메시지를 가로채지 않습니다.
 
 `make install`은 사용자 스킬 경로 `~/.agents/skills/loop-work`와
 `~/.claude/skills/loop-work`를 `~/.local/share/loop-work/install`의 관리 어댑터에 연결합니다.
@@ -77,6 +87,37 @@ make uninstall
 호스트별 연결·런타임·상태의 관리 `.gitignore` 블록을 추가합니다. 해제는 목표·상태·지식 기록을
 보존하고, 상태 기록이 남으면 `/.loop/state/` 제외 규칙도 남깁니다.
 
+## 작업 보드 열기
+
+Codex에서는 **`$loop-work board serve`**, Claude Code에서는 **`/loop-work board serve`**로
+작업 보드를 엽니다. `board`만 적어도 serve로 처리합니다. localhost 서버를 시작하고 기본
+브라우저를 자동으로 열며, `--no-open`이면 서버만 실행합니다. 요청한 로컬 화면을 여는 데
+다시 승인을 요구하지 않습니다.
+
+```sh
+python3 scripts/loop.py board serve --port 0
+# 별도 지식 홈: --knowledge-home을 subcommand 앞에 두고 vault도 명시
+# python3 scripts/loop.py --knowledge-home /absolute/knowledge board serve --vault /absolute/vault
+# 브라우저를 열지 않으려면 뒤에 --no-open
+```
+
+작업 카드·상세·추적 문서·사람 요청의 **표시 데이터는 Obsidian vault의 Markdown**입니다.
+런타임 SQLite/JSON은 실행·권한·검증 상태를 확인합니다. 문서가 없거나 stale이면 DB 내용을
+화면에 조용히 대신 채우지 않고 진단을 보여 주며, 수정한 Markdown만으로 QA·완료·승인을
+우회할 수 없습니다. 사람 노트와 문서 편집은 보존합니다.
+
+board는 활성화보다 먼저 분기하며 기존 entrypoint·knowledge home·session·task를 유지합니다.
+하네스가 off여도 켜지 않고 새 목표·세션을 만들지 않습니다. 승인/해결된 `resume_task`도
+명시적인 실행이 별도이며, 응답만으로 모델 호출·예산 초기화·QA·병합·배포를 하지 않습니다.
+실행이 저장됐는데 vault 출력이 실패한 경우에는 실행을 반복하지 않고 문서 오류로 구분합니다.
+
+보드에서 진행 중 작업에 원문 보완·제약·일시 중지·재개를 직접 전달할 수 있습니다.
+재개는 pause 피드백만 해제하며 phase blocker·예산·QA를 우회하지 않습니다. 중지는 관찰 지점에서
+실제 진행 중 호출을 멈추며 이미 적용된 변경을 자동 되돌린다고 약속하지 않습니다.
+
+기존 `$loop-work human` / `/loop-work human`과 `human list|show|request|respond|execute|serve`
+CLI는 호환성을 유지합니다. 새 요청 생성·명시 대체 등 CLI 관리는 [운영 문서](docs/operations.md#사람의-결정과-수동-조치)를 따릅니다.
+
 ## 기존 loop-dev 설치에서 전환
 
 기존 연결 설치가 있으면 새 설치는 변경 없이 중단합니다. 원본 저장소에서 기존 연결을 제거한 뒤 설치합니다.
@@ -94,7 +135,7 @@ make install
 기존 `~/.local/share/loop-dev/knowledge.sqlite3`가 있으면 그 위치를 계속 사용해 기록과 전달물 경로를
 보존합니다. 새 이름과 옛 이름의 DB가 모두 있으면 `LOOP_KB_HOME`으로 사용할 것을 명시해야 합니다.
 `.loop/`의 목표·상태와 `LOOP_*` 환경 변수는 그대로 유지합니다. 새 대화에서 `/loop-work` 또는
-`$loop-work`로 활성화합니다. 이전 연결 진입점은 전환 안내와 함께 중단하고 자동 실행하지 않습니다.
+`$loop-work <작업 내용>`으로 한 작업을 시작합니다. 이전 연결 진입점은 전환 안내와 함께 중단하고 자동 실행하지 않습니다.
 
 ## 두 단계의 역할
 
@@ -110,7 +151,7 @@ make install
 
 | 작업 유형 | 수행과 완료 확인 |
 | --- | --- |
-| 개발 | 사전 교차 검토 → 목표·규칙 고정 → 구현·테스트·반대 도구 검토·수정 → 전체 최종 검증 |
+| 개발 | 사전 독립 검토 → 목표·규칙 고정 → 구현·테스트·독립 검토·수정 → 전체 최종 검증 |
 | 문서·설명 | 작성·설명 후 내용과 전달물 조건 확인 |
 | 조사·읽기 전용 검토 | 근거 조사 후 결론·불확실성·범위 확인 |
 | 계획 | 실행 없이 계획과 요청한 판단 기준 확인 |
@@ -193,9 +234,21 @@ flowchart TD
 - 에이전트가 변경을 조사한 뒤 해당 항목을 갱신합니다. 조회만으로 오래된 결론을 최신으로 만들지 않습니다.
 - 확정 사실·초안·가설·과거 결과를 구분합니다. 과거 성공 기록은 현재 검증이나 새로운 권한을 대신하지 않습니다.
 
-기본 위치는 `~/.local/share/loop-work/`이며 `LOOP_KB_HOME` 또는 `--knowledge-home`으로
-변경할 수 있습니다. 프로젝트 밖에 두며 전역 공급자 설정을 수정하지 않습니다.
+신규 기본 위치는 `~/.loop-work/data/`이며 `LOOP_KB_HOME` 또는 `--knowledge-home`을
+명시하면 그 위치를 사용합니다. 기존 `~/.local/share/loop-work/`·legacy `loop-dev` DB는
+자동 이동 없이 재사용합니다. 프로젝트 밖에 두며 전역 공급자 설정을 수정하지 않습니다.
 세션 ID와 저장 명령은 에이전트가 관리합니다.
+
+## Obsidian에서 결과 읽기
+
+보드는 `~/.loop-work/vault`의 Markdown을 표시 데이터로 사용합니다. 같은 문서를 Obsidian에서도 엽니다.
+새 문서는 `projects/인증서버--<project-id>/tasks/권한검사-수정--<task-id>/현재-권한검사-수정--<task-id>.md`처럼
+프로젝트·작업 내용을 이름으로 구분하고 안정적인 ID를 함께 유지합니다. 기존 관리 경로는 이동하지 않고
+한국어 프로젝트·주제·작업 색인에서 연결합니다. 한국어 설명과 상태를 사용하되 사용자 원문·코드·명령·증거는 바꾸지 않습니다. 마지막 상태를
+보고, `interim/`·`final/`에서 시점별 중간/완료 기록을 읽습니다. 직접 쓸 메모는 `notes/`에 둡니다.
+완료 파일의 존재만으로 현재 QA 통과나 최신 근거가 보장되지는 않습니다. 원본은 DB와 개발 JSON이며
+사람 노트는 보존합니다. 출력 오류는 하네스 실행을 막지 않습니다. 경로·근거 전달 범위는
+[지식 운영](docs/knowledge.md#obsidian-문서-공간)을 따릅니다.
 
 ## 읽기 쉬운 실행 기록
 
@@ -219,14 +272,15 @@ flowchart TD
 
 | 용도 | 명령 |
 | --- | --- |
-| 세션 활성화 | `harness on`, `harness status`, `harness off` |
+| 작업 결속 | `harness on --task TASK_ID`, `harness status`, `harness off` |
 | 공통 작업 | `work open`, `work goal`, `work start`, `work delegate`, `work team`, `work assess`, `work finish` |
 | 메인 복구·피드백 | `orchestration context`, `orchestration feedback` |
+| vault 작업 보드 | `board serve`(기본 브라우저 열기), `board serve --no-open`(서버만) |
 | 지식 재사용·갱신 | `knowledge context`, `knowledge remember`, `knowledge get`, `knowledge history` |
 | 프로젝트 연결 | `knowledge projects`, `knowledge attach` |
 | 개발 | `init`, `delegate`, `team`, `assess`, `validate`, `doctor`, `plan-review`, `freeze`, `start`, `checkpoint`, `finish` |
 | 하네스 자체 평가 | `bench check`(전체 실행), `bench plan`, `bench run`, `bench judge`, `bench report`, `bench gate`, `bench proposal` |
-| 맥락·복구 | `context`, `status`, `note`, `block`, `resume`, `abort`, `session`; 공통 작업은 `work` 하위 명령 |
+| 맥락·복구 | `context`, `status`, `note`, `block`, `retire`, `resume`, `abort`, `session`; 공통 작업은 `work` 하위 명령 |
 
 | 위치 | 내용 |
 | --- | --- |
@@ -234,9 +288,11 @@ flowchart TD
 | `.loop/goals/<id>/` | 개발 목표와 최초 진단; Git 포함 권장 |
 | `.loop/state/<id>/` | 개발 상태·검증 로그·맥락·`status.md`; Git 제외 |
 | `.loop/state/sessions/` | 개발 세션의 분석과 이전 답변; Git 제외 |
-| `LOOP_KB_HOME/knowledge.sqlite3` | 세션 활성화·공통 지식·프로젝트·작업·위임·실행 예산 및 이전 버전 |
+| `LOOP_KB_HOME/knowledge.sqlite3` | 작업 결속·공통 지식·프로젝트·작업·위임·실행 예산 및 이전 버전 |
 | `.loop/state/<id>/delegations/`, `LOOP_KB_HOME/runs/` | 작업자 지시·결과·원본·로그; 팀 메시지와 상세 전달물은 반환된 참조로 조회 |
 | `LOOP_KB_HOME/views/` | 같은 기록에서 생성한 Markdown과 JSON 뷰 |
+| `~/.loop-work/data/` | 새 설치의 기본 지식 DB·실행 산출물; 기존 지식 홈이 있으면 그대로 재사용 |
+| `~/.loop-work/vault/` | 프로젝트·작업별 중간/최종 보고서의 Obsidian 문서 공간 |
 
 공통 `work finish`로 개발 게이트를 우회할 수 없습니다. 개발 완료에는 실제 검사와 새로운
 독립 검토가 필요하며, 소스·목표·규칙 변경으로 이전 증거가 만료됩니다. 커밋·병합·배포는 완료
@@ -293,7 +349,7 @@ git diff --check
 ```
 
 외부 패키지 없이 임시 Git 저장소와 **가짜 Claude/Codex CLI**로 게이트, 복구, 지식 재사용, 문서 생성,
-설치, 세션 활성화 유지·분리, 위임 범위·수정 적용, 벤치 비교 실행·회귀 판정을 검증합니다.
+설치, 작업 결속·완료 후 해제·분리, 위임 범위·수정 적용, 벤치 비교 실행·회귀 판정을 검증합니다.
 작업 분할·프로필 선택·후보 채택/폐기·상향 재시도도 같은 방식으로 검증합니다.
 실제 계정의 모델 호출 품질은 검증하지 않습니다.
 시작 전 읽기 전용 분석 위임으로 작업 CLI를, 개발 `plan-review`로 검토 CLI를 확인합니다.
@@ -305,3 +361,20 @@ git diff --check
 - [개발 운영·검증·장애 대응](docs/operations.md)
 - [하네스 품질 벤치마크](docs/benchmark.md)
 - [공통 진입 규칙](rules/work.md)
+
+단일 Codex 환경의 벤치 예시(명시적 모델·effort는 사용 가능한 값으로 선택):
+
+```sh
+python3 scripts/benchmark.py --provider codex --codex-model gpt-6.1-sol --codex-effort low --repeats 3
+```
+
+Claude CLI가 없으면 Claude 모델·effort 인수는 필요 없습니다. `--repeats 1`은 전송·구성
+확인용이며 품질 검증 통과 근거가 아닙니다. 새 단일 제공자 프로필의 첫 실행은 별도 baseline입니다.
+
+
+공개 중단 명령은 이제 `block GOAL --input FILE` / `work block TASK --input FILE`의
+typed 근거 입력이 필수이며 reason-only 입력은 거절합니다. 실패한 단위의 예산과 전체
+작업 예산을 구분합니다. `retire`는 승인된 대체 작업과 현재 근거로 완료 의무를 교체하되
+원래 실패·시도 이력과 최종 검증 조건을 보존합니다. V2 위임은 검증 책임, 누적 정정,
+exact-base patch와 standalone request revision을 지원합니다(팀은 revision 1 한정).
+[입력·마이그레이션 안내](docs/operations.md#typed-block-and-retirement)를 따릅니다.
