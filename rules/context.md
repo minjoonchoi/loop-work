@@ -262,7 +262,13 @@ project context; share them only intentionally.
 
 ## Vault documents and recovery
 
-`~/.loop-work/vault` contains project/task reports for reading in Obsidian. Recover
+`~/.loop-work/vault` contains readable project/task reports for Obsidian. Navigate
+from `안내.md` to `프로젝트/<짧은 이름--8자리 식별자>/목록.md`, then `지식/` or
+`작업/<짧은 이름--8자리 식별자>/진행 현황.md`. `공통 지식/` is cross-project knowledge;
+`개인 메모/` and human-edited project/task documents remain human-owned. New authored
+knowledge needs a short Korean noun-phrase `title` (one line, at most 60 characters)
+separate from its complete conclusion in `summary`. Do not rewrite historical
+statements to obtain a shorter navigation name. Recover
 control state from the retained knowledge home and development JSON, not from a report
 filename or a hand-edited note. Keep the existing entrypoint/session/task binding and
 read only the needed vault references; do not load the whole vault as worker context.
@@ -271,3 +277,23 @@ steering through the normal versioned feedback path before relying on it. Report
 confer no new read scope. Missing/stale/edited exports do not reset budgets, alter source
 pins or block the original work. Existing knowledge homes and `.loop` audit paths stay
 where they are; the vault is not an automatic migration or cloud-sync setup.
+
+## Ordinary input memory without a task
+
+An unrelated ordinary request does not start a new harness task/session or activation.
+Related steering of an already explicit bound task still follows its existing feedback/
+control rules and retains that task and consumed budgets; ordinary wording does not
+make it unrelated. A memory-only write creates no task, activation, execution call or
+additional authority. When information is relevant to present or future explicit work,
+retain only useful supported facts or scoped user decisions with `knowledge remember`
+as a project topic with a short Korean `title` and a separate complete `summary`. Read project context and use its observed revision. Omit `--task`;
+`source_task_id` remains null. Pass `--session` only for this conversation's already
+identified session; otherwise omit it, without selecting the latest or fabricating IDs.
+Preserve actual user/source references in `evidence` and decisions' `basis`/
+`applies_to`. Do not invent inspected original text from a reference-only message,
+store credentials or dump the conversation transcript. Respect recording restrictions.
+
+A later explicit task may select the topic ID/revision and original source references
+as context. Do not move its ownership into that task, stamp it fresh merely by reading,
+or treat remembered prose as approval, completion, a scope change or dispatch authority.
+Only the explicit task branch uses `work open --explicit-skill` or `init --explicit-skill`.

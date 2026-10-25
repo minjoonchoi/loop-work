@@ -13,6 +13,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import tempfile
 import uuid
 
 from . import bench_transport
@@ -21,9 +22,84 @@ from .process import execute
 from .storage import LoopError, digest, file_hash, inside, now, read_json, write_json, write_text
 
 ACTIVATION_PROTOCOL = 'task-scoped-v1'
+SETUP_PROTOCOL = 'isolated-copy-install-v1'
+
+
+class SetupPreflightError(LoopError):
+    """Packaging/configuration evidence, never a model-quality result."""
+
+
+def installation_preflight(source, snapshot, output):
+    """Check the sealed export using only Python and a disposable local install."""
+    output = Path(output)
+    try:
+        actual = source_snapshot(source)
+        if actual != snapshot:
+            raise LoopError('Exported source differs from the frozen source snapshot')
+        package = 'loop_work' if 'loop_work/engine.py' in snapshot['files'] else 'loop_dev'
+        required = set()
+        if package + '/desktop_install.py' in snapshot['files']:
+            required.update(('scripts/verify_tauri_native.py', 'desktop/package.json', 'desktop/package-lock.json',
+                             'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/Cargo.lock',
+                             'desktop/src-tauri/src/main.rs'))
+        missing = sorted(required - snapshot['files'].keys())
+        if missing:
+            raise LoopError('Required install sources missing: ' + ', '.join(missing))
+        with tempfile.TemporaryDirectory(prefix='loop-bench-install-') as temporary:
+            base = Path(temporary)
+            home, target = base / 'home', base / 'project'
+            home.mkdir()
+            target.mkdir()
+            (target / 'README.md').write_text('Preserve local user content.\n')
+            driver = '''import importlib,json,runpy,sys
+from pathlib import Path
+source,target=map(Path,sys.argv[1:3])
+package=sys.argv[3]
+sys.path.insert(0,str(source))
+installer=runpy.run_path(str(source/'scripts/install.py'),run_name='bench_install_preflight')
+expected=installer['managed_files']()
+installer['install'](target)
+for name,data in expected.items():
+    assert (target/name).read_bytes()==data, 'Installed payload differs: '+name
+assert (target/'README.md').read_text()=='Preserve local user content.\\n'
+for name in list(sys.modules):
+    if name==package or name.startswith(package+'.'):
+        del sys.modules[name]
+sys.path.remove(str(source))
+sys.path.insert(0,str(target/'.loop'))
+modules=[]
+for path in sorted((target/'.loop'/package).glob('*.py')):
+    module=importlib.import_module(package+'.'+path.stem)
+    assert Path(module.__file__).resolve().is_relative_to((target/'.loop').resolve())
+    modules.append(path.stem)
+assert modules and 'engine' in modules, 'Copied runtime package is absent or empty'
+import subprocess
+help_result=subprocess.run([sys.executable,'-E','-B',str(target/'.loop/loop.py'),'--help'],
+                           cwd=target,capture_output=True,timeout=10)
+assert help_result.returncode==0 and help_result.stdout.strip(), 'Copied entrypoint --help failed'
+print(json.dumps({'managed_files':len(expected),'imported_modules':len(modules),'preserved_user_file':True}))
+'''
+            result = execute([sys.executable, '-I', '-B', '-c', driver, str(source), str(target), package],
+                             base, output / 'process', 30, kill_tree=True,
+                             env_overrides={'HOME': str(home), 'XDG_DATA_HOME': str(home / 'data'),
+                                            'XDG_CONFIG_HOME': str(home / 'config'),
+                                            'LOOP_KB_HOME': str(base / 'knowledge'),
+                                            'CODEX_HOME': str(home / 'codex')})
+            if result['exit_code'] != 0 or result.get('timed_out') or result.get('cancelled'):
+                raise LoopError('Isolated copied installation/import failed; inspect preflight/process logs')
+            receipt = json.loads(Path(result['stdout']).read_text())
+        if source_snapshot(source) != snapshot:
+            raise LoopError('Exported source changed during isolated installation/import')
+        value = {'protocol': SETUP_PROTOCOL, 'passed': True, 'source_hash': snapshot['hash'], **receipt}
+        write_json(output / 'result.json', value)
+        return value
+    except (LoopError, OSError, ValueError, AssertionError) as exc:
+        write_json(output / 'result.json', {'protocol': SETUP_PROTOCOL, 'passed': False,
+                                          'verdict': 'inconclusive', 'error': str(exc)})
+        raise SetupPreflightError(str(exc)) from exc
 ARMS = ('plain', 'candidate')
 KINDS = ('development', 'document', 'explanation', 'research', 'review', 'planning', 'session')
-SOURCE_PATHS = ('Makefile', 'scripts/setup_workspace.py', 'scripts/loop.py', 'scripts/install.py', 'scripts/benchmark.py', 'scripts/runtime.py', 'loop_work/', 'rules/', 'templates/', 'skills/loop-work/')
+SOURCE_PATHS = ('desktop/', 'scripts/verify_tauri_native.py', 'Makefile', 'scripts/setup_workspace.py', 'scripts/loop.py', 'scripts/install.py', 'scripts/benchmark.py', 'scripts/runtime.py', 'loop_work/', 'rules/', 'templates/', 'skills/loop-work/')
 
 
 def integer(value, low, high, label):
@@ -179,9 +255,13 @@ def source_snapshot(root):
                       for path in SOURCE_PATHS) if legacy else SOURCE_PATHS
     for selector in selectors:
         path = root / selector
-        candidates = path.rglob('*') if selector.endswith('/') else [path]
+        if selector == 'desktop/':
+            from .desktop_sources import paths as desktop_paths
+            candidates = desktop_paths(root)
+        else:
+            candidates = path.rglob('*') if selector.endswith('/') else [path]
         for p in candidates:
-            if '__pycache__' in p.parts or p.name != 'Makefile' and p.suffix not in ('.py', '.md', '.json', '.yaml', '.html', '.js', '.css'):
+            if any(part in ('__pycache__','node_modules','target','dist','.git','.vite','coverage','gen','icons') for part in p.relative_to(root).parts) or p.name != 'Makefile' and p.suffix not in ('.py', '.md', '.json', '.yaml', '.html', '.js', '.mjs', '.cjs', '.css', '.rs', '.toml', '.lock', '.ts', '.tsx', '.txt', '.svg'):
                 continue
             if p.is_symlink():
                 raise LoopError('Harness source must not use symlinks')
@@ -276,7 +356,7 @@ def profile_observation(expected, phase):
 
 
 TRIAL_PLAN_PROTOCOL = 'fixed-trial-identifiers-v1'
-TRIAL_EXPERIMENT_FIELDS = ('activation_protocol', 'arms', 'suite_hash', 'models', 'efforts', 'providers',
+TRIAL_EXPERIMENT_FIELDS = ('activation_protocol', 'setup_protocol', 'arms', 'suite_hash', 'models', 'efforts', 'providers',
                            'repeats', 'seed', 'environment', 'evaluation', 'routing', 'review_policy')
 
 
@@ -308,11 +388,16 @@ def validate_trial_plan(value, spec, output, *, historical=False):
     if 'activation_protocol' not in spec:
         if not historical:
             raise LoopError('New trial-plan execution requires an explicit activation protocol')
-        experiment_fields = tuple(k for k in TRIAL_EXPERIMENT_FIELDS if k != 'activation_protocol')
     else:
         if spec['activation_protocol'] != ACTIVATION_PROTOCOL:
             raise LoopError('Unsupported trial-plan activation protocol')
-        experiment_fields = TRIAL_EXPERIMENT_FIELDS
+    if 'setup_protocol' not in spec:
+        if not historical:
+            raise LoopError('New trial-plan execution requires an explicit setup protocol')
+    elif spec['setup_protocol'] != SETUP_PROTOCOL:
+        raise LoopError('Unsupported trial-plan setup protocol')
+    experiment_fields = tuple(k for k in TRIAL_EXPERIMENT_FIELDS
+                              if k not in ('activation_protocol', 'setup_protocol') or k in spec)
     if any(k not in spec for k in experiment_fields):
         raise LoopError('Trial-plan experiment is missing frozen settings')
     experiment = {k: spec[k] for k in experiment_fields}
@@ -372,10 +457,14 @@ def prepare(suite_path, candidate, models, providers, repeats, seed, environment
         raise LoopError('Select distinct conversation providers')
     if not isinstance(environment, str) or not environment.strip():
         raise LoopError('Describe the fixed host/configuration profile')
-    current = source_snapshot(candidate)
+    try:
+        current = source_snapshot(candidate)
+    except (LoopError, OSError, UnicodeError) as exc:
+        raise SetupPreflightError('Source snapshot preflight failed: ' + str(exc)) from exc
     routing = bench_transport.routing_profile(models, efforts, routing_profile)
     planned_trials = len(suite['cases']) * len(providers) * repeats * len(ARMS)
-    spec = {'version': 2, 'activation_protocol': ACTIVATION_PROTOCOL, 'arms': list(ARMS), 'suite': suite, 'suite_hash': seal, 'assets': assets,
+    spec = {'version': 2, 'activation_protocol': ACTIVATION_PROTOCOL, 'setup_protocol': SETUP_PROTOCOL,
+            'arms': list(ARMS), 'suite': suite, 'suite_hash': seal, 'assets': assets,
             'source': {'candidate': current},
             'models': models, 'efforts': efforts, 'evaluation': evaluation, 'routing': routing,
             'review_policy': {'version': 1, 'available_providers': sorted(models),
@@ -625,7 +714,11 @@ def run(suite_path, candidate, models, providers, repeats, seed, environment, ou
     sources = {}
     for arm in spec['source']:
         sources[arm] = output / 'sources' / arm
-        export_files(sources[arm], spec['source'][arm]['files'])
+        try:
+            export_files(sources[arm], spec['source'][arm]['files'])
+        except (LoopError, OSError, ValueError) as exc:
+            raise SetupPreflightError('Source export failed: ' + str(exc)) from exc
+        installation_preflight(sources[arm], spec['source'][arm], output / 'preflight' / arm)
     spec['created_at'] = now()
     spec['mode'] = 'simulation' if executables else 'live'
     spec['versions'] = {}

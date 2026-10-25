@@ -57,6 +57,103 @@ class KnowledgeTests(unittest.TestCase):
         self.work.define(task["id"], self.goal())
         return self.work.start(task["id"])["task"]
 
+    def test_topic_title_is_presentation_only_and_searchable_without_promoting_evidence(self):
+        original = self.entry(title="메모 저장 설계", status="hypothesis", evidence=[])
+        saved = self.remember(original)
+        self.assertEqual(saved["title"], "메모 저장 설계")
+        self.assertEqual(saved["summary"], original["summary"])
+        self.assertEqual(saved["status"], "hypothesis")
+        self.assertIsNone(saved["source_task_id"])
+        context = self.kb.context(self.locations, query="메모 저장")
+        self.assertEqual([x["id"] for x in context["unconfirmed"]], [saved["id"]])
+        self.assertEqual(context["reusable"], [])
+        before = {k: v for k, v in saved.items() if k != "title"}
+        renamed = self.remember({**original, "title": "메모 저장의 검증 한계"})
+        self.assertEqual({k: v for k, v in renamed.items() if k != "title"}, before)
+        self.assertEqual(self.kb.history("topic", saved["id"]), [saved])
+        for invalid in ("", "줄바꿈\n제목", "x" * 61, "TODO"):
+            with self.subTest(title=invalid), self.assertRaises(LoopError):
+                self.remember({**original, "title": invalid})
+        self.assertEqual(self.kb.get("topic", saved["id"]), renamed)
+
+    def test_title_add_change_and_remove_preserve_stale_evidence_and_all_provenance(self):
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        subprocess.run(["git", "-C", str(self.root), "symbolic-ref", "HEAD", "refs/heads/original"], check=True)
+        first = self.open_task()
+        second = self.open_task()
+        entry = self.entry()
+        with patch("loop_work.knowledge.now", return_value="2020-01-01T00:00:00+00:00"), \
+             patch("loop_work.knowledge.harness_digest", return_value="original-harness"):
+            saved = self.remember(entry, session_id=first["session_id"], task_id=first["id"])
+        (self.root / "guide.md").write_text("The source now contradicts the stored conclusion.\n")
+        (self.root / "AGENTS.md").write_text("Changed source rules.\n")
+        subprocess.run(["git", "-C", str(self.root), "symbolic-ref", "HEAD", "refs/heads/changed"], check=True)
+        previous = saved
+        for title in ("메모 저장 원리", "메모 근거의 한계", None):
+            with self.subTest(title=title), \
+                 patch("loop_work.knowledge.now", return_value="2030-01-01T00:00:00+00:00"), \
+                 patch("loop_work.knowledge.harness_digest", return_value="changed-harness"):
+                submitted = {**entry, **({"title": title} if title is not None else {})}
+                renamed = self.remember(submitted, session_id=second["session_id"], task_id=second["id"])
+                self.assertEqual({k: v for k, v in renamed.items() if k != "title"},
+                                 {k: v for k, v in saved.items() if k != "title"})
+                self.assertEqual(renamed.get("title"), title)
+                self.assertEqual("title" in renamed, title is not None)
+                self.assertEqual(self.kb.history("topic", saved["id"])[-1], previous)
+                context = self.kb.context(self.locations)
+                self.assertEqual(context["reusable"], [])
+                self.assertEqual([x["id"] for x in context["stale"]], [saved["id"]])
+                self.assertIn("changed: guide.md", context["stale"][0]["stale_reasons"])
+                self.assertIn("rules_or_branch_changed", context["stale"][0]["stale_reasons"])
+                self.assertEqual(self.kb.get("topic", saved["id"]), renamed)
+                previous = renamed
+        self.assertEqual(len(self.kb.history("topic", saved["id"])), 3)
+
+    def test_title_with_semantic_change_still_records_current_evidence_and_provenance(self):
+        first = self.open_task()
+        second = self.open_task()
+        updates = ({"summary": "The changed guide describes a different cache."},
+                   {"evidence": ["guide.md:changed"]}, {"status": "draft"}, {"paths": ["."]})
+        for index, semantic in enumerate(updates):
+            with self.subTest(semantic=semantic):
+                entry = self.entry(id="semantic-" + str(index), title="원래 메모")
+                with patch("loop_work.knowledge.now", return_value="2020-01-01T00:00:00+00:00"), \
+                     patch("loop_work.knowledge.harness_digest", return_value="original-harness"):
+                    saved = self.remember(entry, session_id=first["session_id"], task_id=first["id"])
+                (self.root / "guide.md").write_text("Changed evidence for semantic update " + str(index))
+                with patch("loop_work.knowledge.now", return_value="2030-01-01T00:00:00+00:00"), \
+                     patch("loop_work.knowledge.harness_digest", return_value="changed-harness"):
+                    updated = self.remember({**entry, **semantic, "title": "수정한 메모"},
+                                            session_id=second["session_id"], task_id=second["id"])
+                    current = self.kb.observe(self.locations)[self.location["id"]]
+                    self.assertEqual(updated["fingerprints"],
+                                     {p: self.kb.fingerprint(current, p) for p in updated["paths"]})
+                    self.assertEqual(updated["harness"], "changed-harness")
+                    self.assertEqual(updated["recorded_at"], "2030-01-01T00:00:00+00:00")
+                    self.assertEqual(updated["source_task_id"], second["id"])
+                    self.assertEqual(updated["source_session_id"], second["session_id"])
+                    for key, value in semantic.items():
+                        self.assertEqual(updated[key], value)
+                    self.assertNotEqual(updated["fingerprints"], saved["fingerprints"])
+                    self.assertEqual(self.kb.history("topic", saved["id"]), [saved])
+
+    def test_title_only_remember_preserves_additional_stored_metadata(self):
+        entry = self.entry(title="원래 지식 제목")
+        saved = self.remember(entry)
+        extended = self.kb.put_topic({**saved, "custom_metadata": {
+            "original_note": "Preserve additional source information.", "nested": [1, {"keep": True}]}})
+        history = self.kb.history("topic", saved["id"])
+        (self.root / "guide.md").write_text("The stored conclusion now needs new evidence.\n")
+        renamed = self.remember({**entry, "title": "지식 근거의 한계"})
+        self.assertEqual({k: v for k, v in renamed.items() if k != "title"},
+                         {k: v for k, v in extended.items() if k != "title"})
+        self.assertEqual(self.kb.get("topic", saved["id"]), renamed)
+        self.assertEqual(self.kb.history("topic", saved["id"]), [*history, extended])
+        context = self.kb.context(self.locations)
+        self.assertEqual(context["reusable"], [])
+        self.assertEqual([x["id"] for x in context["stale"]], [saved["id"]])
+        self.assertEqual(json.loads((self.kb.home / "views/topic/docs-cache.json").read_text()), renamed)
+
     def test_freshness_updates_without_restamping_or_history_noise(self):
         saved = self.remember()
         doc = self.kb.home / "views/topic/docs-cache.md"

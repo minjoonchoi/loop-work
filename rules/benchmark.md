@@ -43,6 +43,13 @@ work does not need a benchmark experiment. See the source repository's
 - Resolve missing user-owned choices before start. Technical setup and intermediate
   commands belong to the agent. Do not request procedural prompts from the user.
 
+An isolated setup/import preflight establishes exported-source equality and installs
+only into isolated trial fixtures before provider calls. Setup failure is inconclusive:
+no provider/judge call or passing-history promotion. New profiles identify this protocol as
+`setup_protocol: "isolated-copy-install-v1"`; legacy profiles without the field keep
+their original hashes. Host fingerprints and rubrics remain unchanged.
+See [setup details](../docs/benchmark.md#고립-설치import-사전검사).
+
 ## Evaluate and report
 
 - Run both conditions in fresh workspaces and conversations; resume the same provider

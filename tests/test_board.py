@@ -21,7 +21,7 @@ class BoardTests(unittest.TestCase):
         (self.project/'source.txt').write_text('source\n')
         self.vault=self.base/'vault'; self.kb=KnowledgeBase(self.base/'kb',vault_home=self.vault)
         self.work=Work(self.kb)
-        self.task=self.work.open('document','Vault-driven task','codex',[self.project])['task']
+        self.task=self.work.open('document','Vault-driven task','codex',[self.project],explicit_skill=True)['task']
         self.work._stop_internal(self.task['id'],'Operator confirmation required')
         self.desk=HumanDesk(self.kb)
         self.request=self.desk.create(self.task['id'],{'id':'approval-one','kind':'approval','title':'Resume task',
@@ -58,7 +58,7 @@ class BoardTests(unittest.TestCase):
         current=self.board.show(row['id'])
         self.assertIn('User edit from Obsidian.',current['body'])
         self.assertTrue(current['modified']); self.assertFalse(current['writable'])
-        with self.assertRaisesRegex(LoopError,'stale|modified'):
+        with self.assertRaisesRegex(LoopError,'오래되었거나 수정'):
             self.board.respond(row['id'],{'decision':'approve','text':'Approve'},1,current['revision'])
         self.assertEqual(self.kb.get('human-request',row['id'])['status'],'pending')
 
@@ -103,7 +103,7 @@ class BoardTests(unittest.TestCase):
         task=self.board.show(self.task['id'],'task')
         manifest=read_json(self.kb.home/'vault-owned.json')
         for name in list(manifest['files']):
-            if name.endswith('/current.md') or manifest.get('documents',{}).get(name,{}).get('role')=='current':
+            if manifest.get('documents',{}).get(name,{}).get('role')=='current':
                 del manifest['files'][name]
         write_json(self.kb.home/'vault-owned.json',manifest)
         # A DB record without any vault document remains invisible.
@@ -129,10 +129,10 @@ class BoardTests(unittest.TestCase):
 
     def test_interim_final_documents_are_read_from_managed_vault_and_never_write_authority(self):
         task=self.board.show(self.task['id'],'task')
-        interim=[item for item in task['documents'] if '/interim/' in item['path']]
+        interim=[item for item in task['documents'] if item.get('role')=='interim']
         self.assertTrue(interim)
         document=self.board.document(interim[0]['path'])
-        self.assertIn('Historical',document['warnings'][0]); self.assertFalse(document['writable'])
+        self.assertIn('과거 문서',document['warnings'][0]); self.assertFalse(document['writable'])
         path=self.vault/interim[0]['path']; path.write_text(path.read_text()+'\nHistorical note edit.\n')
         current=self.board.document(interim[0]['path'])
         self.assertIn('Historical note edit.',current['body']); self.assertTrue(current['modified'])
@@ -165,7 +165,7 @@ class BoardTests(unittest.TestCase):
 
     def test_unavailable_optional_history_does_not_hide_current_task(self):
         task=self.board.show(self.task['id'],'task')
-        interim=next(item for item in task['documents'] if '/interim/' in item['path'])
+        interim=next(item for item in task['documents'] if item.get('role')=='interim')
         (self.vault/interim['path']).unlink()
         current=self.board.show(self.task['id'],'task')
         self.assertEqual(current['record']['id'],self.task['id'])

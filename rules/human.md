@@ -58,11 +58,9 @@ revision and execute it once:
 
 ```sh
 python3 "$ENTRYPOINT" --knowledge-home "$KNOWLEDGE_HOME" human execute "$REQUEST_ID" --expected-revision "$REVISION"
-python3 "$ENTRYPOINT" --knowledge-home "$KNOWLEDGE_HOME" human serve --session "$SESSION_ID" --port 0
 ```
 
-For the UI, report the exact returned localhost URL. Keep the server local and stop
-it when the person is finished. UI responses must come from the person; never click
+For the native Board, use `board open` on macOS. Responses must come from the person; never click
 approval controls on their behalf without their explicit answer. The desk cannot run
 arbitrary CLI/shell commands. `resume_task` does not dispatch workers, reset attempts,
 complete QA gates, merge code, commit/push, publish, or grant external permissions.

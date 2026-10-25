@@ -40,10 +40,9 @@ def _inventory():
     paths.extend(SOURCE / name for name in (
         'skills/loop-work/SKILL.md', 'skills/loop-work/agents/openai.yaml',
         'skills/loop-work/loop.py',
-        'scripts/loop.py', 'scripts/runtime.py'))
-    for folder in ('human_ui_assets', 'board_ui_assets'):
-        paths.extend(SOURCE / 'loop_work' / folder / name
-                     for name in ('index.html', 'app.js', 'style.css'))
+        'scripts/loop.py', 'scripts/runtime.py', 'scripts/verify_tauri_native.py'))
+    from .desktop_sources import paths as desktop_paths
+    paths.extend(desktop_paths(SOURCE))
     result = {}
     for path in paths:
         _directory(path.parent)
@@ -59,8 +58,7 @@ def _sealed_engine(pins):
     selected = {name: pin for name, pin in pins.items()
                 if (name.startswith('loop_work/') and name.endswith('.py'))
                 or (name.startswith('rules/') and name.endswith('.md'))
-                or name.startswith('loop_work/human_ui_assets/')
-                or name.startswith('loop_work/board_ui_assets/')
+                or name.startswith('desktop/')
                 or name in ('skills/loop-work/SKILL.md', 'skills/loop-work/agents/openai.yaml')}
     return digest({'version': 1, 'files': selected})
 

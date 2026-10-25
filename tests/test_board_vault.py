@@ -22,6 +22,7 @@ class BoardVaultTests(unittest.TestCase):
         self.kb = KnowledgeBase(self.base / 'data', vault_home=self.base / 'vault')
         self.task = {'id': 'task-one', 'title': 'A readable task', 'kind': 'document', 'phase': 'working',
                      'session_id': 'session-one', 'project_ids': ['project-one'],
+                     'provenance': {'version':1,'source':'explicit_loop_work'},
                      'goal': {'outcome': 'Explain current behavior'}, 'result': None}
         self.folder = self.base / 'vault'
 
@@ -34,7 +35,7 @@ class BoardVaultTests(unittest.TestCase):
         self.kb.put('task', self.task)
         current = self.document('current')
         envelope, body = metadata(current)
-        self.assertEqual(envelope, {'version': 2, 'kind': 'task', 'id': 'task-one', 'role':'current','project_id':'project-one','task_id':'task-one',
+        self.assertEqual(envelope, {'version': 3, 'kind': 'task', 'id': 'task-one', 'role':'current','project_id':'project-one','task_id':'task-one',
                                     'knowledge_home': str(self.kb.home), 'record': self.kb.get('task', 'task-one')})
         self.assertIn('최종 내보내기 기준', body)
         self.assertIn('A readable task', body)
@@ -82,7 +83,7 @@ class BoardVaultTests(unittest.TestCase):
         self.assertEqual(row['record'], self.task)
         self.assertTrue(row['fresh']); self.assertTrue(row['writable'])
         self.assertEqual(row['revision'], row['vault_revision'])
-        historical = [item for item in row['documents'] if '/interim/' in item['path']]
+        historical = [item for item in row['documents'] if item.get('role')=='interim']
         self.assertTrue(historical)
         history = board.document(historical[0]['path'])
         self.assertFalse(history['writable'])
@@ -96,7 +97,7 @@ class BoardVaultTests(unittest.TestCase):
         self.assertTrue(changed['fresh'])  # raw record still matches; body pin does not
 
     def test_unrelated_malformed_markdown_does_not_block_runtime_export(self):
-        notes = self.base / 'vault/notes'; notes.mkdir(parents=True)
+        notes = self.base / 'vault/내 메모'; notes.mkdir(parents=True)
         malformed = notes / 'personal.md'; malformed.write_text('---\nloop_work: [invalid YAML\nMy own note')
         self.kb.put('task', self.task)
         self.assertEqual(self.kb.vault_status()['errors'], [])

@@ -20,7 +20,12 @@ Claude는 `.claude/skills/loop-work/SKILL.md`의 `disable-model-invocation: true
 공통 본문은 `skills/loop-work/SKILL.md` 한 곳에서 관리하고 설치 때 환경별 어댑터를 생성합니다.
 `make install`은 `scripts/install.py --link --workspace`로 실행됩니다. 사용자 요청에 따라
 Obsidian 존재를 확인하고 없으면 기존 Homebrew를 사용해 설치하며, `~/.loop-work/vault`와
-그 `.obsidian` 폴더를 준비합니다. 기존 vault·앱 설정·사용자 노트는 덮어쓰지 않고 앱의
+그 `.obsidian` 폴더를 준비합니다. macOS에서는 프로젝트 로컬 Tauri 2/Rust 빌드로 `Loop Work.app`을 컴파일해
+사용자 `~/Applications/Loop Work.app` 또는 TARGET의 `.loop/Loop Work.app`에 설치합니다.
+기존 비소유·수정·심링크 앱 bundle은 덮어쓰지 않습니다. 필요한 Rust·Node 빌드 도구가 없으면 명확히 실패하고
+전역 toolchain을 자동 설치하지 않습니다. GUI의 npm/cargo 의존성은 프로젝트 로컬로 설치·빌드하며
+Python backend에 패키지 의존성을 추가하지 않습니다. Python 표준 라이브러리 backend는 macOS/Linux에서 유지하고
+네이티브 전면은 macOS 전용입니다. 기존 vault·앱 설정·사용자 노트는 덮어쓰지 않고 Obsidian의
 전역 vault 등록·동기화·플러그인은 설정하지 않습니다. 이 설치 단계 외 하네스 런타임은
 Python 표준 라이브러리로 실행하고 저수준 설치/벤치마크가 brew를 호출하지 않습니다.
 
@@ -182,6 +187,21 @@ python3 "ENTRYPOINT" --knowledge-home "KNOWLEDGE_HOME" context my-goal
 
 ## 이 저장소의 검증 범위
 
+[개발 규칙](../rules/workflow.md#4-execute-the-entire-loop-without-further-user-questions)의
+`check_failure_policy`는 신규 `fail_fast`/선택 `diagnostic_continue`이며 기존 누락은 continue입니다.
+`not_run_checks`는 미실행이고 최종 fresh 전체검사·독립 검토를 대신하지 않습니다.
+관련 GUI handoff의 default argv·source 밖 fixture·설치 후 근거·feature/cache와 ENOSPC 진단은
+[위임 규칙](../rules/delegation.md#prepare-one-assignment)을 따릅니다. 긴 native 실행은 관측된
+마지막 완료 단계와 timeout/증거종류를 알리고, 무변화 대기는 [진행 기록](../rules/writing.md#progress-and-interim-deliverables)대로 설명합니다.
+
+
+`verify_tauri_native.py`는 `preflight.json`에 write probe·capacity 관측을 남기고,
+`progress.json`에는 최대 64개 시작/종료 event와 current_stage/last_completed_stage/last_native_stage를 둡니다.
+임의 공간 threshold나 cache 삭제·이동은 하지 않습니다. `run-failure.json`은
+timeout/interrupted/storage_enospc와 마지막 단계를 보존합니다. 증거는
+`shipping_native_lifecycle` / `test_only_native_webview_actual_api`로 구분하며 composition은
+`synthetic_events`, `physical_gui_input_verified=false`로 한정합니다.
+
 ```sh
 python3 -m unittest discover -s tests -v
 git diff --check
@@ -191,6 +211,12 @@ git diff --check
 서브프로세스 생성, 인자 전달, JSON 처리, 실패·시간 초과·재시도·재개, 상태 전이와 설치를
 검증합니다. 두 실제 CLI의 로그인된 모델 호출이나 AI 검토의 품질을 검증한 테스트는 아닙니다.
 CI는 Linux/macOS와 Python 3.10/3.12 조합으로 같은 테스트를 실행합니다.
+Python unittest discovery는 Cargo가 PATH에 있다는 이유만으로 GUI를 빌드하지 않습니다. 실제 native
+Rust 검사는 준비된 macOS의 별도 명시 gate에서 실행합니다. 캐시·toolchain이 준비된 개발자가
+unittest 안에서도 같은 검사를 실행하려면 `LOOP_NATIVE_TESTS=1 python3 -m unittest discover -s tests -p test_desktop_native.py -v`
+를 사용합니다. 이 opt-in은 `--locked --offline` 실패를 숨기거나 의존성을 다운로드하지 않습니다.
+Linux Python suite는 opt-in과 Cargo가 있어도 native 빌드를 호출하지 않습니다. 해당 플랫폼의
+실제 실행 근거와 플랫폼 분기를 mock한 단위 회귀는 구분해 보고합니다.
 
 로그와 프롬프트에는 프로젝트 맥락이 포함될 수 있습니다. `.loop/state/`는 Git에서
 제외됩니다. 이를 첨부하거나 다른 컴퓨터로 옮길 때는 필요한 범위만 의도적으로 전달합니다.
@@ -324,20 +350,19 @@ high complexity/risk/uncertainty를 보존합니다. 파일 수·언어 metadata
 
 ## 보드 열기와 문서 추적
 
-Codex는 `$loop-work board serve`, Claude Code는 `/loop-work board serve`를 사용합니다.
-`board`만 적으면 serve로 처리하고, 기존 진입점·지식 홈·session/task를 유지합니다. off 상태를
-켜거나 새 목표·세션을 만들지 않습니다. 명시한 보드 요청에 따라 localhost 서버와 기본
-브라우저를 열며 다시 승인을 묻지 않습니다. `--no-open`이면 서버만 시작합니다.
+macOS에서는 Finder의 Loop Work.app 또는 Codex `$loop-work board`, Claude Code
+`/loop-work board`를 사용합니다. `board`만 적으면 `open`으로 처리하며 기존 진입점·지식 홈·
+session/task를 유지합니다. off 상태를 켜거나 새 목표·세션을 만들지 않습니다. `open`은 macOS Tauri 2/React 창을 열며 번들 React 화면과 내부 인증 API를 사용합니다. `start`는 앱이나 브라우저 없이 backend만 준비합니다. Linux는 하네스와 텍스트 CLI를 지원하며 데스크톱 앱은 지원하지 않습니다.
+요청한 로컬 앱 열기에 다시 승인을 묻지 않습니다.
 
 ```sh
-python3 "$ENTRYPOINT" --knowledge-home "$KNOWLEDGE_HOME" board serve --session "$SESSION_ID" --port 0
+python3 "$ENTRYPOINT" --knowledge-home "$KNOWLEDGE_HOME" board open --session "$SESSION_ID" --port 0
 # 선택된 작업만: --task "$TASK_ID"
-# 서버만: --no-open
 # 임의 별도 KB: 같은 명령에 --vault /absolute/vault 명시
 ```
 
-브라우저 열기가 실패하면 실제 출력 URL로 접속하며, 서버가 이미 실행됐으면 같은 요청을
-새 서버로 반복하지 않습니다. 사용 후 서버를 중지합니다. 작업 카드·상세·추적·사람 요청의
+앱 시작 실패와 서버 실패를 구분하고 열린 창을 확인하지 못했으면 성공으로 보고하지 않습니다.
+임의로 브라우저로 전환하거나 이미 실행한 서버를 중복 시작하지 않습니다. 작업 카드·상세·추적·사람 요청의
 표시 데이터는 vault Markdown이며, SQLite/JSON은 실행·권한·검증 상태를 확인합니다.
 문서가 없거나 확인할 수 없으면 DB 내용을 숨은 대체 화면으로 채우지 않고 진단합니다.
 
@@ -349,11 +374,12 @@ revision을 함께 검사합니다. stale·소유권/범위 불일치는 원문�
 자동 재제출하지 않습니다. 원래 task/control/budget/source guard는 그대로 적용됩니다.
 
 vault의 고정 project/task `current.md` 경로는 소유 manifest가 없더라도 안전한 범위에서
-읽기 전용으로 발견합니다. runtime authority와 맞지 않거나 비소유인 문서는 표시할 수 있어도
-응답/실행 권한을 만들지 않습니다. 하나의 중간 문서가 없거나 안전하지 않아도 다른 정상
-기록은 유지합니다. task/session으로 제한한 서버는 다른 작업의 export 경로·ID·오류를
-공개하지 않으며 전역 진단은 생략한 상태만 표시합니다. 상세 전역 진단은 범위를 제한하지
-않은 보드나 로컬 export 상태에서 확인합니다.
+읽기 전용으로 발견할 수 있습니다. 작업 문서는 현재 runtime 작업에 명시 loop-work 출처가 있고
+연결 정보가 일치할 때만 표시하며, 해당 runtime 작업이 없거나 출처가 불명확하면 숨깁니다.
+소유 pin이 없는 문서는 읽기 전용이며 응답/실행 권한을 만들지 않습니다. 하나의 중간 문서가 없거나 안전하지 않아도 다른 정상
+기록은 유지합니다. 범위를 제한하지 않은 Board도 export 경로·작업 ID·제목·개별 오류를
+공개하지 않고 식별자 없는 집계 진단만 표시합니다. CLI/KB의 상세 로컬 export 진단은 그대로
+유지하며, Board에서 세부 정보를 숨겼다는 사실을 출력 오류가 없다는 뜻으로 해석하지 않습니다.
 
 응답은 실제 사람의 원문이고 허용된 `resume_task` 실행은 별도 명시 행동입니다. action이
 commit됐는데 vault 출력만 실패한 경우에는 기록된 action 결과와 export 오류를 나눠 표시하고
@@ -364,7 +390,7 @@ commit됐는데 vault 출력만 실패한 경우에는 기록된 action 결과�
 
 `$loop-work human` / `/loop-work human`은 활성화보다 먼저 분기하여 원래
 entrypoint·knowledge home·세션·작업·활성 상태를 유지하면서 사람에게 남은
-요청을 처리합니다. 뒤에 `list|show|request|respond|execute|serve`를 지정합니다.
+요청을 처리합니다. 뒤에 `list|show|request|respond|execute`를 지정합니다.
 별도 스킬을 설치하지 않으며 human만 사용하면 harness 활성화·해제나 새 목표 생성이 없습니다.
 상세 지침은 이 모드에서만 [human 규칙](../rules/human.md)을 읽습니다.
 답변은 사용자가 명시한 원문만 기록합니다. 작업자 제안이나 무응답을
@@ -384,12 +410,10 @@ python3 "$ENTRYPOINT" --knowledge-home "$KNOWLEDGE_HOME" human respond "$REQUEST
 `title`, `question`, `options`, `action`, 선택적인 `evidence`와 `supersedes`이며 현재 `--help`를 확인합니다.
 
 ```sh
-python3 "$ENTRYPOINT" --knowledge-home "$KNOWLEDGE_HOME" human serve --session "$SESSION_ID" --port 0
 python3 "$ENTRYPOINT" --knowledge-home "$KNOWLEDGE_HOME" human execute "$REQUEST_ID" --expected-revision "$REVISION"
 ```
 
-첫 명령은 실제 출력된 localhost URL로 사용하는 브라우저 화면을 시작합니다. 사용이 끝나면
-서버를 중지합니다. 응답과 실행은 별개이며, 두 번째 명령은 사용자가 요청한 승인/해결된
+사람 요청은 macOS의 `board open` 또는 텍스트 CLI로 처리합니다. 응답과 실행은 별개이며, 위 명령은 사용자가 요청한 승인/해결된
 `resume_task`만 수동으로 실행합니다. 기존 작업자/팀 이력 등 안전하게 재개할 수 없는
 상태는 차단될 수 있습니다. 차단 근거를 확인하고 기존 작업 절차로 해결하며 새 작업이나
 예산 초기화로 우회하지 않습니다. 작업 재개는 모델 호출·QA 통과·커밋·푸시·자동 병합을
@@ -409,3 +433,114 @@ UI는 원문과 operation ID, 현재 task/control/vault revision을 함께 전�
 resume는 pause 피드백만 해제하므로 `blocked` phase 해결은 원래 작업 절차에서 수행합니다.
 동기 작업의 pause/off는 runtime 관찰·관리 subprocess polling에서 반영됩니다. 실제 중단 여부와
 소비한 호출·남은 작업을 기록하며 외부 프로세스 전체 즉시 취소나 적용 내용 rollback을 보장하지 않습니다.
+
+## 독립 CLI와 관리형 보드
+
+사용자 설치의 `~/.local/bin/loop-work` 또는 프로젝트 설치의 `.loop/bin/loop-work`는
+스킬이 반환하는 설치 `loop.py`와 같은 runtime을 실행합니다. 별도 Python 패키지나 PATH
+설정을 설치하지 않습니다. 실행 권한·내용은 설치 manifest로 추적하며, 비소유 파일·symlink·
+사용자 수정 충돌은 install/uninstall 전에 거절합니다. 구형 manifest는 그대로 업그레이드할 수 있습니다.
+
+`board start`는 선택한 KB의 `board-service/` 아래 권한 0600의 상태·로그와 lock을 사용합니다.
+설정 digest는 KB/vault/session/task/project와 runtime을 구분합니다. 서버가 반환하는 capability,
+instance nonce, config ID, PID가 일치하는 실제 HTTP readiness를 확인해야 running으로 보고합니다.
+동시에 시작하거나 다시 시작하면 같은 instance를 재사용합니다. 포트 충돌·실행 실패는 로그를
+남기고 성공으로 표시하지 않으며, 공개 lifecycle 출력에는 capability URL을 포함하지 않습니다. `start`는 backend만 준비하고 앱을 자동 실행하지 않습니다.
+
+`board status`는 stopped/starting/running/failed/unknown을 구분합니다. 응답 불일치나 응답 없는
+running 기록은 unknown이며 자동 프로세스 종료나 중복 start를 하지 않습니다. `board stop`은
+loopback capability와 nonce로 인증된 서버에 shutdown을 요청하고 서버의 stopped 기록을 기다립니다.
+PID 재사용이나 기존 미관리 foreground 서버는 종료하지 않습니다. 이미 stopped이면 재실행은 안전합니다.
+설치 해제는 실행 명령·소유 설치 자산을
+제거하고 DB/vault/상태·로그는 보존합니다. 서버 중지는 설치 해제 전에 별도로 요청하세요.
+
+`--project ID`로 서버를 고정하면 다른 project query·상세·위키·질문·저장·제어 요청을 거절합니다.
+프로젝트 검색은 `GET /api/projects?query=...&sort=name|updated`, 목록은
+`GET /api/board?project_id=ID&include_closed=1`을 사용합니다. 프로젝트·작업 위키는
+`GET/POST /api/projects/:id/wiki`, `/api/tasks/:id/wiki?project_id=ID`이며 저장 필드는
+`operation_id`, `expected_revision`, `title`, `body_markdown`만 허용합니다.
+문서 변경은 실행/QA/승인 권한을 부여하지 않습니다.
+
+위키 저장 HTTP JSON은 1MiB로 제한하며 상한 초과는 413으로 거절합니다. 본문을 자동 절단하지
+않습니다. 이 전송 상한과 위키 본문 UTF-8 520192바이트·제목 200자 검증은 별도입니다.
+기존 질문 응답·제어 API의 64KiB 전송 제한은 유지합니다.
+
+보드의 중단 열은 폐기된 작업을 `중단·폐기`, 기술 문제로 막힌 작업을 `기술적 차단`으로
+구분하며 `state_reason`에 작업의 원래 사유를 전달합니다. 사용자 일시정지·응답 대기는
+계속 `사용자 확인 필요`가 우선합니다. 프로젝트의 최근 변경 정렬은 해당 범위의 작업
+기록과 프로젝트·작업 위키 수정 시각을 함께 사용하므로 Obsidian 외부 편집도 반영합니다.
+
+개발 완료 표시는 최종 게이트·소스·피드백뿐 아니라 동결된 계약·발견·규칙·현재 하네스
+입력도 읽기 전용으로 대조합니다. 누락·불일치는 과거 완료 기록을 남긴 채 사용자 확인이
+필요한 상태로 표시합니다. 미결 사람 요청은 Markdown이 없거나 오래되어도 확인 필요
+분류에 반영하며, 보이지 않는 질문·응답 원문을 데이터베이스에서 대신 표시하지 않습니다.
+
+프로젝트 범위의 목록·본문은 선택 범위만 표시합니다. 제어·응답·재개 직전에는 표시 범위와
+별개로 공유 작업의 모든 프로젝트 사본과 해당 요청 사본의 보존된 소유 해시를 검사합니다.
+다른 사본이 수정되거나 삭제되면 선택한 사본이 그대로여도 실행을 거절하며, 다른 프로젝트의
+문서 경로·본문은 오류에 노출하지 않습니다. 누락된 사본은 자동 재생성하지 않습니다.
+
+## 일반 대화 기억과 명시 작업 출처
+
+실제 `$loop-work <작업>` / `/loop-work <작업>` 분기의 내부 생성에만
+`work open --explicit-skill` 또는 `init --explicit-skill`을 사용합니다.
+플래그 없는 저수준 생성은 유지되지만 Board 작업에는 나타나지 않습니다. 과거 작업의 출처를
+소급 변경하거나 vault 복사로 보드 권한을 만들지 않습니다. 정보만 있는 프로젝트는 실제 project index Markdown이 있을 때만 작업 수 0으로
+프로젝트 위키를 읽을 수 있습니다. topic 문서만 있고 index가 없으면 Obsidian 지식으로 남으며
+Board의 프로젝트 항목에는 나타나지 않을 수 있습니다. DB 프로젝트 정보로 화면을 대신 채우지 않습니다.
+
+일반 입력에서 현재·미래 작업에 필요한 사실·사용자 결정은 [작업 없는 기억](knowledge.md#일반-입력의-작업-없는-프로젝트-기억)으로
+선별 보존합니다. task/session/활성화를 만들지 않고, 확인된 기존 session만 선택적으로 사용합니다.
+실제 출처·원문·적용 범위를 보존하며 전체 프롬프트를 자동 수집하지 않습니다.
+
+
+## 데스크톱 창과 서버의 수명주기
+
+TARGET 설치 launcher의 `board open|start|status|stop`은 `--project`를 생략해도 설치한 프로젝트 범위를 일관되게 사용합니다. 기존 연결의 사용자 지정 프로젝트 ID를 유지하며 다른 `--project`는 거절합니다. 아직 연결되지 않은 TARGET의 `status`/`stop`은 전역 서버를 조회·시작·중지하지 않고 `stopped`를 반환합니다. 설치 기록이 앱을 소유한다고 명시하는데 앱이 없거나 손상된 경우에는 범위 없는 서버로 전환하지 않습니다. 앱을 설치하지 않은 기존 저수준 서버 전용 설치는 기존 동작을 유지합니다.
+
+Finder/Dock에서 Loop Work.app을 열거나 `loop-work board open`을 사용합니다.
+창 닫기는 앱을 숨기고 Dock에서 다시 열면 창을 복원합니다. Cmd-Q 종료 시 저장되지 않은
+위키·IME 조합·충돌·저장 응답 미확인은 한국어 확인으로 보호하며, 작업의 pause/resume나
+승인으로 해석하지 않습니다. 자동 Dock 고정·로그인 항목·전역 앱 설정은 변경하지 않습니다.
+
+앱 helper가 새로 만든 backend만 종료/입력 EOF 때 소유 nonce를 확인해 닫습니다.
+`board start`가 먼저 만든 서버에 앱이 연결했거나 기존 CLI 서버를 재사용했다면 앱 종료로
+서버를 끄지 않습니다. 같은 KB/vault/session/task/project 설정의 `board status`와 `board stop`이
+그 관리 경계입니다. 외부 브라우저 및 공개 foreground serve 명령은 제공하지 않습니다.
+
+
+### native 검증 보고 읽기
+
+1. 일반 배포 binary의 실제 startup/quit 4경우는 앱 시작과 소유·재사용·교체 backend 종료 경계의
+   근거입니다. 이 결과만으로 populated 작업 편집이나 시각화·승인·제어까지 검증됐다고 쓰지 않습니다.
+2. `native-qa`는 기본 비활성 feature이며 별도 감사 binary에서만 사용합니다. 실제 Tauri WebView와
+   기존 Rust `board_request` → Python API를 거쳐 임시 populated vault의 편집·응답/승인·제어,
+   창 hide/reopen과 종료 deadline을 확인한 실행을 별도 report로 보존합니다.
+3. programmatic DOM/IME composition/media-query 검사는 `physical_gui_input_verified=false`로 명시합니다.
+   물리 OS 입력·실제 IME 조작이나 모든 접근성 환경의 검증으로 확대하지 않습니다. 일반 앱에는
+   감사 명령을 노출하지 않으며 승인·예산·Python engine 계약을 바꾸지 않습니다.
+4. 실패 진단은 제한된 private audit 경로로 다룹니다. capability·nonce·helper 원문을 frontend나
+   일반 로그로 출력하지 않습니다. 실제 결과와 실패를 보존하고, 완료하지 않은 부모 목표를
+   완료로 표시하거나 inconclusive 벤치마크를 품질·속도 향상 근거로 바꾸지 않습니다.
+
+감사 report의 `feature: "native-qa"`, `shipping_binary: false`, `report.real_tauri_ipc: true`,
+`report.api_proxy_shim: false`는 별도 감사 binary에서 실제 Rust IPC를 사용했다는 구분입니다. native dialog는
+실제로 표시한 뒤 QA observer가 cancel하는 검사이며, 실제 사용자의 dialog 클릭은 검증하지 않습니다.
+
+
+### 종료 확인과 사람 요청의 불명확한 전송
+
+종료 요청은 `request_id`별 guard를 유지합니다. 저장 await 전뿐 아니라 저장 후에도 모든 미결
+사람/제어 요청, 편집 중·저장 중·IME 조합·충돌·불명확한 저장과 원문 초안을 다시 확인합니다.
+확인 중에는 새 입력과 mutation을 막으며, 실제 native dialog에서 같은 ID의 취소 callback이
+돌아오면 해당 종료 guard를 풉니다. 종료 응답 IPC가 만료되거나 실패한 오류 경계에서는 해당
+시도를 진단과 함께 끝내고 그 시도의 guard를 해제해 계속 편집할 수 있게 합니다. QA의 일시적인
+종료 준비 검사 자체는 guard를 반환합니다.
+
+응답/실행 전송이 불명확하면 원래 payload A와 당시 runtime/vault pin을 보관합니다.
+**원래 요청 확인·재시도**는 사용자가 명시적으로 눌렀을 때만 같은 범위의 최신 요청을 GET합니다.
+일치하는 실제 접수 이력이 있으면 POST 없이 접수 확인만 합니다. 그렇지 않으면 원본이 fresh이고
+수정되지 않았으며 writable이고, runtime 원본·revision과 vault revision이 원래 pin과 정확히
+같을 때만 원래 payload A를 한 번 다시 보냅니다. poll이나 새 원문 B로 자동 재전송하지 않습니다.
+B는 보존하며 실행은 원문을 지우지 않고, 응답은 현재 초안이 제출했던 A와 같을 때만 비웁니다.
+이 과정은 승인·실행의 기존 backend 권한 검사나 물리 GUI 입력 검증을 대신하지 않습니다.

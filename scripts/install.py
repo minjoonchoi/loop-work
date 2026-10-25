@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import fcntl
 import os
 from pathlib import Path
 import sys
+import tempfile
 
 SOURCE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SOURCE))
@@ -22,6 +23,8 @@ IGNORE_START = "# loop-work:ignore:start"
 IGNORE_END = "# loop-work:ignore:end"
 IGNORE_BLOCK = f"""{IGNORE_START}
 /.loop/install/
+/.loop/Loop Work.app/
+/.loop/bin/loop-work
 /.loop/loop.py
 /.agents/skills/loop-work
 /.claude/skills/loop-work
@@ -31,7 +34,7 @@ IGNORE_BLOCK = f"""{IGNORE_START}
 BLOCK = f"""{START}
 ## loop-work task binding
 
-loop-work board serve opens the local Obsidian-backed board without changing session activation.
+loop-work board open opens the local desktop task board without changing session activation.
 loop-work human retains the local human-decision CLI without changing activation.
 Explicit loop-work <prompt> binds only that task. Route related corrections/status
 and compaction through its binding; completion or abort releases routing. Unrelated
@@ -52,13 +55,10 @@ def managed_files():
         for source in sorted((SOURCE / folder).glob("*")):
             if source.is_file() and source.suffix in (".py", ".md", ".json"):
                 result[f".loop/{folder}/{source.name}"] = source.read_bytes()
-    for folder in ("human_ui_assets", "board_ui_assets"):
-        assets = SOURCE / "loop_work" / folder
-        for name in ("index.html", "app.js", "style.css"):
-            source = assets / name
-            if assets.is_symlink() or source.is_symlink() or not source.is_file():
-                raise LoopError("Unexpected local UI asset: " + str(source))
-            result[f".loop/loop_work/{folder}/{source.name}"] = source.read_bytes()
+    from loop_work.desktop_sources import paths as desktop_paths
+    for source in desktop_paths(SOURCE):
+        result['.loop/'+source.relative_to(SOURCE).as_posix()] = source.read_bytes()
+    result['.loop/scripts/verify_tauri_native.py'] = (SOURCE/'scripts/verify_tauri_native.py').read_bytes()
     for name in ("loop-work",):
         skill = (SOURCE / f"skills/{name}/SKILL.md").read_text(encoding="utf-8")
         if not skill.startswith("---\n"):
@@ -100,12 +100,16 @@ def install(target):
         manifest_path = destination(root, ".loop/install.json")
         old = read_json(manifest_path) if manifest_path.exists() else {"files": {}}
         managed = managed_files()
-        # Only the previous exact human adapter file names can be retired.
+        # Retire only exact historical human adapter/browser asset names.
         # A v1 manifest is never authority to remove other obsolete paths.
         retired_names = {f"{discovery}/skills/loop-human/{name}" for discovery in (".agents", ".claude")
                          for name in ("SKILL.md", "loop.py")}
         retired_names.add(".agents/skills/loop-human/agents/openai.yaml")
+        retired_names.update('.loop/loop_work/human_ui_assets/'+name
+                             for name in ('index.html','app.js','style.css'))
         removals = []
+        retired_names.update('.loop/loop_work/board_ui_assets/'+name for name in ('index.html','app.js','style.css','editor.js','markdown.js'))
+        retired_names.add('.loop/desktop/LoopWorkApp.swift')
         for name in sorted((set(old["files"]) & retired_names) - set(managed)):
             path = destination(root, name)
             if path.exists() and file_hash(path) != old["files"][name]:
@@ -146,7 +150,8 @@ def install(target):
             if path.exists():
                 path.unlink()
         for path in sorted({parent for path in removals for parent in path.parents
-                            if parent.name == "loop-human" or parent.name == "agents" and parent.parent.name == "loop-human"},
+                            if parent.name == "loop-human" or parent.name == "agents" and parent.parent.name == "loop-human"
+                            or parent in (root / ".loop/loop_work/human_ui_assets", root / ".loop/loop_work/board_ui_assets", root / ".loop/desktop")},
                            key=lambda value: len(value.parts), reverse=True):
             try:
                 path.rmdir()
@@ -223,7 +228,9 @@ if __name__ == "__main__":
     skill = (source / "skills/loop-work/SKILL.md").read_text(encoding="utf-8")
     if not skill.startswith("---\n"):
         raise LoopError("The loop-work skill needs YAML frontmatter")
-    files = {install_name + "/loop.py": wrapper.encode()}
+    launcher_name = ".loop/bin/loop-work" if scope == "project" else ".local/bin/loop-work"
+    launcher = "#!/usr/bin/env python3\nimport runpy\nrunpy.run_path(" + repr(str(base / "loop.py")) + ", run_name='__main__')\n"
+    files = {install_name + "/loop.py": wrapper.encode(), launcher_name: launcher.encode()}
     links = {install_name + "/runtime": str(source)}
     for provider, discovery in (("codex", ".agents"), ("claude", ".claude")):
         adapter = install_name + "/adapters/" + provider
@@ -271,6 +278,10 @@ def _read_link_manifest(root, scope, manifest_path):
     base = ".loop/install" if scope == "project" else f".local/share/{brand}/install"
     expected_files = {base + "/loop.py", base + "/adapters/codex/SKILL.md",
                       base + "/adapters/claude/SKILL.md", base + "/adapters/codex/agents/openai.yaml"}
+    # The original exact layout remains readable for safe upgrades/uninstall.
+    launcher_name = ".loop/bin/loop-work" if scope == "project" else ".local/bin/loop-work"
+    if brand == "loop-work" and launcher_name in old["files"]:
+        expected_files.add(launcher_name)
     expected_links = {base + "/runtime": old["source"]}
     for provider, discovery in (("codex", ".agents"), ("claude", ".claude")):
         adapter = base + "/adapters/" + provider
@@ -302,6 +313,16 @@ def _read_link_manifest(root, scope, manifest_path):
         block = record["block"]
         if not block.startswith(start) or not block.endswith(end) or block.count(start) != 1 or block.count(end) != 1:
             raise LoopError("Invalid managed block in install manifest")
+    if "desktop" in old:
+        from loop_work.desktop_install import BUNDLE_FILES
+        app = old["desktop"]
+        expected_app = ".loop/Loop Work.app" if scope == "project" else "Applications/Loop Work.app"
+        if (brand != "loop-work" or not isinstance(app, dict) or set(app) != {"path", "files", "build"}
+                or app["path"] != expected_app or not isinstance(app["files"], dict)
+                or set(app["files"]) != set(BUNDLE_FILES)
+                or not all(isinstance(pin, str) and len(pin) == 64 for pin in app["files"].values())
+                or not isinstance(app["build"], str) or len(app["build"]) != 64):
+            raise LoopError("Invalid desktop ownership manifest; preserved")
     for name in old.get("directories", []):
         path = _safe_path(root, name)
         if path == root or not any((root / resource).is_relative_to(path) for resource in expected_files | set(expected_links) | {str(manifest_path.relative_to(root))}):
@@ -312,6 +333,9 @@ def _read_link_manifest(root, scope, manifest_path):
 def _preflight_owned(root, old):
     if old is None:
         return
+    if old.get("desktop"):
+        from loop_work.desktop_install import preflight
+        preflight(_safe_path(root, old["desktop"]["path"]), old["desktop"]["files"])
     for name, expected in old["files"].items():
         path = _safe_path(root, name)
         if _present(path) and (path.is_symlink() or not path.is_file() or file_hash(path) != expected):
@@ -368,13 +392,21 @@ def _reject_legacy_install(root, scope):
                         "Copied/unowned installations need manual reconciliation; records are preserved.")
 
 
-def _install_links(home=None, target=None, *, check_only=False):
+def _install_links(home=None, target=None, *, check_only=False, desktop_app=None, desktop_build=None):
     root, scope, manifest_name = _location(home, target)
     _reject_legacy_install(root, scope)
     manifest_path = _safe_path(root, manifest_name)
     old = _read_link_manifest(root, scope, manifest_path)
     _preflight_owned(root, old)
     _, files, links = _link_layout(root, scope, SOURCE)
+    app_name = ".loop/Loop Work.app" if scope == "project" else "Applications/Loop Work.app"
+    if desktop_app is not None:
+        if not isinstance(desktop_build, str) or len(desktop_build) != 64 or any(c not in '0123456789abcdef' for c in desktop_build):
+            raise LoopError("Desktop build fingerprint is required before installation")
+        from loop_work.desktop_install import preflight, inspect_bundle, BUNDLE_FILES
+        preflight(_safe_path(root, app_name), old.get("desktop", {}).get("files") if old else None)
+        if set(inspect_bundle(desktop_app)) != set(BUNDLE_FILES):
+            raise LoopError("Staged desktop bundle is incomplete")
     writes = {}
     for name, data in files.items():
         path = _safe_path(root, name)
@@ -417,8 +449,11 @@ def _install_links(home=None, target=None, *, check_only=False):
                 except OSError:
                     pass  # User files keep their former managed parent.
     for path, data in writes.items():
-        if not path.exists() or path.read_bytes() != data:
+        recreated = not path.exists()
+        if recreated or path.read_bytes() != data:
             _write_preserving_mode(path, data.decode())
+        if path.name == "loop-work" and str(path).endswith("/bin/loop-work") and (recreated or old is None or str(path.relative_to(root)) not in old["files"]):
+            path.chmod(0o755)
     for name, target_name in links.items():
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -430,6 +465,12 @@ def _install_links(home=None, target=None, *, check_only=False):
     manifest = {"version": 2, "kind": "links", "scope": scope, "root": str(root), "source": str(SOURCE),
                 "files": {name: file_hash(root / name) for name in files}, "links": links,
                 "entry_blocks": blocks, "directories": sorted(directories)}
+    if old and "desktop" in old:
+        manifest["desktop"] = old["desktop"]
+    if desktop_app is not None:
+        from loop_work.desktop_install import publish
+        pins = publish(desktop_app, root / app_name, old.get("desktop", {}).get("files") if old else None)
+        manifest["desktop"] = {"path": app_name, "files": pins, "build": desktop_build}
     if old != manifest:
         write_json(manifest_path, manifest)
     return manifest_path.parent
@@ -455,6 +496,9 @@ def _uninstall_links(home=None, target=None, *, legacy=False):
             content += ("\n" if content and not content.endswith("\n") else "") + "/.loop/state/\n"
         writes[root / name] = content
     # Preflight instruction blocks and every owned resource before any removal.
+    if old.get("desktop"):
+        from loop_work.desktop_install import remove
+        remove(root / old["desktop"]["path"], old["desktop"]["files"])
     for path, content in writes.items():
         if path.exists() and path.read_bytes().decode("utf-8") != content:
             _write_preserving_mode(path, content)
@@ -475,11 +519,11 @@ def _uninstall_links(home=None, target=None, *, legacy=False):
     return manifest_path.parent
 
 
-def install_links(home=None, target=None):
+def install_links(home=None, target=None, *, desktop_app=None, desktop_build=None):
     """Register user or project discovery links; keep knowledge/state untouched."""
     root, _, _ = _location(home, target)
     with _installation_lock(root):
-        return _install_links(home, target)
+        return _install_links(home, target, desktop_app=desktop_app, desktop_build=desktop_build)
 
 
 def uninstall_links(home=None, target=None, *, legacy=False):
@@ -498,17 +542,42 @@ def main(argv=None):
     modes.add_argument("--uninstall", action="store_true", help="Remove only resources owned by a link installation")
     modes.add_argument("--uninstall-legacy", action="store_true", help="Remove owned loop-dev links before installing loop-work; preserve records")
     args = parser.parse_args(argv)
+    stack = ExitStack()
+    desktop_app = None
+    desktop_build = None
     try:
         target = args.target
         if (args.link or args.uninstall or args.uninstall_legacy) and target is None and os.environ.get("LOOP_INSTALL_TARGET"):
             target = Path(os.environ["LOOP_INSTALL_TARGET"])
         if args.workspace:
             if not args.link or args.uninstall or args.uninstall_legacy:
-                raise LoopError("--workspace is only valid with --link installation; uninstall preserves the app, vault and data")
+                raise LoopError("--workspace is only valid with --link installation; uninstall preserves Obsidian, vault and data")
             # Check every link destination before any app/workspace mutation.
             scope_root, _, _ = _location(args.home, target)
             with _installation_lock(scope_root):
                 _install_links(args.home, target, check_only=True)
+                if sys.platform == "darwin":
+                    from loop_work.desktop_install import configuration, build_inputs, build_app, preflight, inspect_bundle
+                    from loop_work.storage import digest
+                    _, scope, manifest_name = _location(args.home, target)
+                    old = _read_link_manifest(scope_root, scope, scope_root / manifest_name)
+                    app_path = scope_root / (".loop/Loop Work.app" if scope == "project" else "Applications/Loop Work.app")
+                    previous = old.get("desktop") if old else None
+                    current = preflight(app_path, previous["files"] if previous else None)
+                    entrypoint = scope_root / (".loop/install/loop.py" if scope == "project" else ".local/share/loop-work/install/loop.py")
+                    from loop_work.knowledge import default_home, is_shared_home
+                    from loop_work.workspace import vault
+                    selected_kb = (Path(os.environ["LOOP_KB_HOME"]).expanduser().resolve()
+                                   if args.home is None and os.environ.get("LOOP_KB_HOME") else default_home(args.home))
+                    selected_vault = vault(args.home) if is_shared_home(selected_kb, home=args.home) else None
+                    config = configuration(entrypoint, selected_kb, selected_vault, target_root=scope_root if scope == "project" else None)
+                    desktop_build = digest(build_inputs(config))
+                    if previous and previous["build"] == desktop_build and current == previous["files"]:
+                        desktop_app = app_path
+                    else:
+                        staging = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="loop-work-app-"))).resolve()
+                        desktop_app = build_app(staging / "Loop Work.app", entrypoint, selected_kb, selected_vault, target_root=scope_root if scope == "project" else None)
+                    _install_links(args.home, target, check_only=True, desktop_app=desktop_app, desktop_build=desktop_build)
             from scripts.setup_workspace import bootstrap
             setup = bootstrap(args.home)
             print("Workspace ready at " + setup["root"] + "; Obsidian: " + setup["obsidian"])
@@ -521,8 +590,17 @@ def main(argv=None):
             brand = "loop-dev" if args.uninstall_legacy else "loop-work"
             print(f"Removed {brand} discovery and runtime links from {root}; knowledge and task records are preserved.")
         elif args.link or target is None:
-            root = install_links(args.home, target)
+            root = install_links(args.home, target, desktop_app=desktop_app, desktop_build=desktop_build)
+            if desktop_app is not None:
+                scope_root, scope, _ = _location(args.home, target)
+                print("Desktop application: " + str(scope_root / (".loop/Loop Work.app" if scope == "project" else "Applications/Loop Work.app")))
+            elif args.workspace:
+                print("Native desktop application is macOS-only; the portable CLI remains available.")
+            launcher = (root.parents[2] / "bin/loop-work") if target is None else root.parent / "bin/loop-work"
             print(f"Linked loop-work at {root}. Start with /loop-work in Claude Code or $loop-work in Codex.")
+            print("Executable: " + str(launcher))
+            if str(launcher.parent) not in os.environ.get("PATH", "").split(os.pathsep):
+                print("PATH is unchanged. Use the absolute command above or add " + str(launcher.parent) + " to PATH.")
         else:
             if args.home is not None:
                 raise LoopError("--home applies only to link installation; use --link with --target")
@@ -532,6 +610,9 @@ def main(argv=None):
     except (LoopError, OSError, ValueError) as exc:
         print(f"Install failed: {exc}", file=sys.stderr)
         return 2
+
+    finally:
+        stack.close()
 
 
 if __name__ == "__main__":

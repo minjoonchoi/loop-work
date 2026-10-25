@@ -39,8 +39,7 @@ class InstallFreshnessTests(ProjectTest):
     def test_bounded_policy_seal_detects_code_rules_and_skill_metadata(self):
         before = snapshot(self.root)
         for relative in ("loop_work/cli.py", "rules/work.md", "skills/loop-work/SKILL.md",
-                         "skills/loop-work/agents/openai.yaml", "rules/human.md", "loop_work/human_ui_assets/index.html",
-                         "loop_work/human_ui_assets/app.js", "loop_work/human_ui_assets/style.css"):
+                         "skills/loop-work/agents/openai.yaml", "rules/human.md", "loop_work/board_ui.py", "loop_work/human_ui.py"):
             with self.subTest(relative=relative):
                 seal = engine_digest()
                 self.mutate(relative)

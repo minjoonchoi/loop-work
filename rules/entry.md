@@ -46,3 +46,9 @@ eligible recorded `resume_task`, with existing pause and integrity controls inta
 
 Read [human mode](human.md) only when handling that argument or an explicit human-desk
 command. Human-only use creates no goal or session and preserves the existing binding.
+
+Ordinary input may supply relevant project knowledge under
+[the memory-only boundary](context.md#ordinary-input-memory-without-a-task), without
+creating or binding a task/session. Only an actual explicit skill task invocation
+sets `--explicit-skill` during creation. Never add the flag retrospectively to make
+ordinary or legacy records appear in the Board; retained absence/unknown origin is preserved.

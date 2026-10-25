@@ -29,7 +29,7 @@ class BoardScopeTests(unittest.TestCase):
             project = self.base / ('project-' + str(index))
             project.mkdir()
             (project / 'input.txt').write_text('Original input\n')
-            task = self.work.open('document', title, 'codex', [project])['task']
+            task = self.work.open('document', title, 'codex', [project],explicit_skill=True)['task']
             self.work._stop_internal(task['id'], 'Operator confirmation required')
             self.tasks.append(self.kb.get('task', task['id']))
         self.task, self.other = self.tasks
@@ -45,15 +45,17 @@ class BoardScopeTests(unittest.TestCase):
         self.assertTrue(status['errors'], status)
         # An unsafe historical note must not disclose its path via global scan
         # warnings on a server scoped to the unrelated primary task/session.
-        self.unsafe_name = str(Path(self.other_path).parent / 'interim/OUTSIDE-PATH-SENTINEL.md')
+        self.unsafe_name = str(Path(self.other_path).parent / '기록' / '중간' / ('날짜미상-중간-' + 'a'*20 + '.md'))
         unsafe = self.vault / self.unsafe_name
-        unsafe.parent.mkdir(exist_ok=True)
+        unsafe.parent.mkdir(parents=True,exist_ok=True)
         external = self.base / 'OUTSIDE-EXTERNAL-SENTINEL.txt'
         external.write_text('OUTSIDE-FILE-CONTENT-SENTINEL')
         unsafe.symlink_to(external)
         manifest_path = self.kb.home / 'vault-owned.json'
         manifest = read_json(manifest_path)
         manifest['files'][self.unsafe_name] = file_hash(unsafe)
+        manifest['documents'][self.unsafe_name] = {'kind':'task','id':self.other['id'],'role':'interim',
+            'project_id':self.other['project_ids'][0],'task_id':self.other['id']}
         write_json(manifest_path, manifest)
         self.sentinels = (self.other['id'], self.other['session_id'], self.other_path, self.unsafe_name,
                           'OUTSIDE-TITLE-SENTINEL', 'OUTSIDE-REQUEST-SENTINEL',

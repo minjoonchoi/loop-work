@@ -8,6 +8,16 @@ from .storage import LoopError, now
 TERMINAL = ('completed', 'aborted')
 
 
+def explicit_skill_task(record):
+    """Creation provenance only; binding/session history never supplies it."""
+    if not isinstance(record, dict):
+        return False
+    marker = record.get('provenance')
+    return (type(marker) is dict and set(marker) == {'version', 'source'}
+            and type(marker.get('version')) is int and marker['version'] == 1
+            and marker.get('source') == 'explicit_loop_work')
+
+
 def activation_status(session, task=None):
     value=session.get('harness',{})
     bound=value.get('scope')=='task' and identifier(value.get('task_id'))

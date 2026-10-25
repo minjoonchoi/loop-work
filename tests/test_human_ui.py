@@ -71,18 +71,17 @@ class HumanUiTests(unittest.TestCase):
         connection.close()
         return result
 
-    def test_loopback_static_csp_and_no_arbitrary_file_read(self):
+    def test_api_only_loopback_has_no_standalone_page_and_preserves_csp(self):
         self.assertEqual(self.server.server_address[0], '127.0.0.1')
         self.assertIn('/#' + self.server.capability_token, self.server.url)
         code, headers, body = self.request('GET', '/', capability=False)
-        self.assertEqual(code, 200)
+        self.assertEqual(code, 404)
         self.assertIn("frame-ancestors 'none'", headers['Content-Security-Policy'])
         self.assertNotIn(self.server.capability_token.encode(), body)
         for path in ('/../README.md', '/api/file?path=/etc/passwd', '/style.css?token=secret'):
             self.assertIn(self.request('GET', path)[0], (400, 404))
-        script = self.request('GET', '/app.js', capability=False)[2]
-        self.assertIn(b'textContent', script)
-        self.assertNotIn(b'innerHTML', script)
+        for name in ('/app.js','/style.css','/index.html'):
+            self.assertEqual(self.request('GET',name,capability=False)[0],404)
 
     def test_host_origin_and_capability_rejected_before_backend_calls(self):
         for headers, capability in (({'Host': 'evil.invalid'}, True), ({'Origin': 'https://evil.invalid'}, True), ({}, False), ({'Sec-Fetch-Site': 'cross-site'}, True)):

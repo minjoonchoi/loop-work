@@ -69,7 +69,8 @@
 - `cwd`: 저장소 안의 상대 경로. 저장소 밖을 가리키는 경로·심볼릭 링크는 거절합니다.
 - `timeout_seconds`: 1~3600초.
 
-각 체크포인트에서는 해당 작업의 인수 검증과 **모든 회귀 검증**을 실행합니다.
+각 체크포인트의 필수 대상은 해당 작업의 인수 검증과 **모든 회귀 검증**입니다. 실제 후속 실행은
+아래 고정 실패 정책을 따르며, 미실행은 성공이 아닙니다.
 최종 게이트는 모든 명령을 다시 실행합니다. `echo`, 빈 테스트 탐색, 무조건 성공하는 명령,
 파일 존재 확인만으로 기능의 성공을 증명하지 않습니다. 테스트가 실제로 실행되는 명령을
 선택하고, 검토자가 테스트의 의미와 약화 여부도 확인합니다.
@@ -93,12 +94,19 @@
   "worker_timeout_seconds": 600,
   "max_gate_attempts": 3,
   "review_timeout_seconds": 600,
-  "max_run_seconds": 14400
+  "max_run_seconds": 14400,
+  "check_failure_policy": "fail_fast"
 }
 ```
 
+신규 계약의 `check_failure_policy` 기본값은 `fail_fast`이며 알려진 검사 실패 뒤 후속 호출을
+멈춥니다. `diagnostic_continue`는 진단을 계속하고, 필드 없는 기존 계약은 continue 의미를
+유지하며 소급 수정하지 않습니다. `not_run_checks`는 id/reason과 알려진 실패의 after_check를
+기록하며 미실행을 통과로 세지 않습니다. 최종 수용에는 모든 fresh 검사와 독립 검토가 그대로
+필요합니다. 세부 실행 정책은 [개발 규칙](../rules/workflow.md#4-execute-the-entire-loop-without-further-user-questions)을 따릅니다.
+
 `orchestrator`는 현재 대화 환경이며 세션 소유자입니다. `implementer`는 실제 구현을 위임받는
-작업 도구입니다. 검토자는 구현 도구의 반대 공급자입니다. 생략된 `orchestrator`는 기존 계약과의
+작업 도구입니다. 검토자는 사용 가능한 반대 공급자를 우선하며, 해당 CLI가 없으면 사전에 고정한 같은 공급자의 새 독립 호출을 사용합니다. 생략된 `orchestrator`는 기존 계약과의
 호환을 위해 `implementer`와 같게 해석합니다. 작업 도구의 호출 한도는 기본 40회, 각 위임 ID의
 시도는 최대 3회입니다. ID를 새로 만들어도 전체 호출 한도는 초기화되지 않습니다.
 모델·effort는 고정한 정책 안에서 작업 수요에 맞게 명시적으로 선택합니다. CLI 기본값은

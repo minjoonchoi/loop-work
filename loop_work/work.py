@@ -67,7 +67,9 @@ class Work:
     def __init__(self, knowledge=None):
         self.knowledge = knowledge or KnowledgeBase()
 
-    def open(self, kind, title, provider, paths, session_id=None, worker=None):
+    def open(self, kind, title, provider, paths, session_id=None, worker=None, *, explicit_skill=False):
+        if type(explicit_skill) is not bool:
+            raise LoopError("explicit_skill must be a boolean creation option")
         if kind not in KINDS or kind == "development":
             raise LoopError("Development work uses init and its existing development gates")
         concise(title, "Task title", 120)
@@ -88,6 +90,8 @@ class Work:
                  "goal": None, "preflight_execution": preflight_execution,
                  "notes": [], "result": None, "created_at": now(), "updated_at": now(),
                  "version_token": uuid.uuid4().hex}
+        if explicit_skill:
+            value["provenance"] = {"version": 1, "source": "explicit_loop_work"}
         self.knowledge.put("task", value)
         return self.context(value["id"])
 

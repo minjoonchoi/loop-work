@@ -42,7 +42,7 @@ class BoardControlTests(unittest.TestCase):
         self.assertTrue(replay['reused'])
         self.assertEqual(self.kb.list('feedback'),before)
         changed={**payload,'text':'Different original input.'}
-        with self.assertRaisesRegex(LoopError,'immutable'):
+        with self.assertRaisesRegex(LoopError,'바꿀 수 없습니다'):
             self.board.control(self.task['id'],changed)
         self.assertEqual(self.kb.list('feedback'),before)
 
@@ -60,7 +60,7 @@ class BoardControlTests(unittest.TestCase):
         row=self.board.show(self.task['id'],'task')
         path=self.vault/row['path']; path.write_text(path.read_text()+'\nUser-edited intent.\n')
         payload=self.payload()
-        with self.assertRaisesRegex(LoopError,'read-only|modified'):
+        with self.assertRaisesRegex(LoopError,'수정되었거나 읽기 전용'):
             self.board.control(self.task['id'],payload)
         self.assertEqual(self.kb.list('feedback'),[])
 
@@ -72,7 +72,7 @@ class BoardControlTests(unittest.TestCase):
             self.kb.put('task',task)
             return original(instance,*args,**kwargs)
         with patch.object(Orchestration,'feedback',race):
-            with self.assertRaisesRegex(LoopError,'Task changed'):
+            with self.assertRaisesRegex(LoopError,'작업이 변경'):
                 self.board.control(self.task['id'],payload)
         self.assertEqual(self.kb.list('board-control'),[])
         self.assertEqual(self.kb.list('feedback'),[])
@@ -94,7 +94,9 @@ class BoardControlTests(unittest.TestCase):
         with patch.object(Orchestration,'feedback',late_failure), patch.object(self.kb,'vault_status',side_effect=OSError('status unavailable')):
             result=self.board.control(self.task['id'],self.payload())
         self.assertTrue(result['action_committed'])
-        self.assertEqual(result['vault_status']['status'],'unavailable')
+        self.assertEqual(result['vault_status']['status'],'withheld')
+        self.assertTrue(result['vault_status']['errors'])
+        self.assertNotIn('status unavailable',str(result['vault_status']))
         self.assertTrue(worker_context(self.kb,self.task['id'])['paused'])
 
     def test_http_controls_require_capability_scope_and_all_revisions(self):
@@ -111,7 +113,7 @@ class BoardControlTests(unittest.TestCase):
             self.assertEqual(fixture.http('POST',endpoint,payload,{'X-Loop-Capability':'wrong'})[0],403)
             bad={**payload}; del bad['expected_task_revision']
             self.assertEqual(fixture.http('POST',endpoint,bad)[0],400)
-            other=fixture.work.open('document','Other task','codex',[fixture.project])['task']
+            other=fixture.work.open('document','Other task','codex',[fixture.project],explicit_skill=True)['task']
             self.assertNotEqual(fixture.http('POST','/api/tasks/'+other['id']+'/control',payload)[0],200)
             code,body=fixture.http('POST',endpoint,payload)
             self.assertEqual(code,200,body)
@@ -135,7 +137,7 @@ class BoardControlTests(unittest.TestCase):
         row=self.board.list(include_closed=True)['tasks'][0]
         self.assertEqual(row['record']['id'],self.task['id'])
         self.assertFalse(row['control']['available'])
-        self.assertIn('Unknown session',row['control']['block_reason'])
+        self.assertIn('세션을 찾을 수 없습니다',row['control']['block_reason'])
 
     def test_long_pause_remains_observable_and_explicitly_resumable(self):
         original='가'*6000

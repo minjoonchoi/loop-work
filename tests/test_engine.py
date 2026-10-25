@@ -399,3 +399,89 @@ class RejectionTests(ProjectTest):
             result = self.engine.gate("M1")
         self.assertFalse(result["passed"])
         self.assertIn("denied", result["error"])
+
+
+class CheckFailurePolicyTests(ProjectTest):
+    def configure(self, policy='fail_fast', first_passes=False, first_argv=None, first_timeout=5):
+        import sys
+        self.marker = Path(self.temp.name) / 'later-checks.txt'
+        path = self.engine.goal_dir / 'contract.json'
+        contract = read_json(path)
+        if policy is None:
+            contract['execution'].pop('check_failure_policy', None)
+        else:
+            contract['execution']['check_failure_policy'] = policy
+        contract['checks'][0]['argv'] = [sys.executable, '-B', '-c', 'raise SystemExit('+('0' if first_passes else '3')+')']
+        if first_argv is not None:
+            contract['checks'][0]['argv'] = first_argv
+            contract['checks'][0]['timeout_seconds'] = first_timeout
+        contract['checks'].append({'id':'later','kind':'regression','cwd':'.','timeout_seconds':5,
+            'argv':[sys.executable,'-B','-c',"from pathlib import Path;p=Path("+repr(str(self.marker))+");p.write_text((p.read_text() if p.exists() else '')+'ran\\n')"]})
+        write_json(path,contract)
+        self.running()
+
+    def test_new_default_stops_after_failure_without_later_side_effect_or_review(self):
+        self.configure()
+        with patch('loop_work.providers.review',side_effect=AssertionError('Failed checks must not review')):
+            result=self.engine.gate('M1')
+        self.assertFalse(result['passed']);self.assertFalse(self.marker.exists())
+        self.assertEqual([x['id'] for x in result['checks']],['behavior'])
+        self.assertEqual(result['not_run_checks'],[{'id':'later','reason':'known_check_failure','after_check':'behavior'}])
+        self.assertEqual(result['checks'][0]['process']['exit_code'],3)
+
+    def test_explicit_diagnostic_continue_runs_later_checks_without_promoting_failure(self):
+        self.configure('diagnostic_continue')
+        result=self.engine.gate('M1')
+        self.assertFalse(result['passed']);self.assertEqual(self.marker.read_text(),'ran\n')
+        self.assertEqual(len(result['checks']),2);self.assertEqual(result['not_run_checks'],[])
+        self.assertIsNone(result['review'])
+
+    def test_legacy_absence_keeps_continuation_and_frozen_contract_bytes(self):
+        self.configure(None)
+        path=self.engine.goal_dir/'contract.json';before=path.read_bytes()
+        result=self.engine.gate('M1')
+        self.assertFalse(result['passed']);self.assertTrue(self.marker.exists())
+        self.assertEqual(result['check_failure_policy'],'diagnostic_continue')
+        self.assertEqual(path.read_bytes(),before)
+
+    def test_successful_final_runs_every_check_again_and_obtains_fresh_review(self):
+        self.configure(first_passes=True)
+        first=self.engine.gate('M1');final=self.engine.gate()
+        self.assertTrue(first['passed']);self.assertTrue(final['passed'])
+        self.assertEqual(self.marker.read_text(),'ran\nran\n')
+        self.assertEqual([x['id'] for x in final['checks']],['behavior','later'])
+        self.assertEqual(final['not_run_checks'],[])
+        self.assertNotEqual(first['review']['artifact'],final['review']['artifact'])
+
+    def test_cancelled_check_retains_cause_and_does_not_run_later_check(self):
+        self.configure('diagnostic_continue')
+        value={'exit_code':-15,'timed_out':False,'cancelled':True,'cancel_reason':'Explicit task pause'}
+        with patch('loop_work.engine.execute',return_value=value) as execute:
+            result=self.engine.gate('M1')
+        self.assertEqual(execute.call_count,1);self.assertTrue(result['cancelled'])
+        self.assertEqual(result['error'],'Explicit task pause');self.assertFalse(self.marker.exists())
+        self.assertEqual(result['not_run_checks'],[{'id':'later','reason':'cancelled'}])
+        self.assertFalse(result['passed'])
+
+    def test_real_timeout_is_retained_and_following_check_is_not_run(self):
+        import sys
+        self.configure(first_argv=[sys.executable,'-B','-c','import time;time.sleep(2)'],first_timeout=1)
+        result=self.engine.gate('M1')
+        self.assertFalse(result['passed']);self.assertTrue(result['checks'][0]['process']['timed_out'])
+        self.assertFalse(self.marker.exists());self.assertEqual(result['not_run_checks'][0]['reason'],'known_check_failure')
+
+    def test_mid_gate_budget_exhaustion_keeps_cause_and_unexecuted_check(self):
+        self.configure('diagnostic_continue')
+        with patch.object(self.engine,'remaining',side_effect=[100,100,0,0]):
+            result=self.engine.gate('M1')
+        self.assertFalse(result['passed']);self.assertEqual(result['error'],'Execution budget exhausted')
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(result['not_run_checks'],[{'id':'later','reason':'execution_budget_exhausted'}])
+        self.assertFalse(self.state()['retryable'])
+
+    def test_frozen_policy_cannot_change_before_next_attempt(self):
+        self.configure();path=self.engine.goal_dir/'contract.json';contract=read_json(path)
+        contract['execution']['check_failure_policy']='diagnostic_continue';write_json(path,contract)
+        before=self.state()['attempts'].copy()
+        with self.assertRaises(LoopError):self.engine.gate('M1')
+        self.assertEqual(self.state()['attempts'],before);self.assertFalse(self.marker.exists())

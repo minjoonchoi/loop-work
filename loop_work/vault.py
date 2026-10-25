@@ -12,7 +12,8 @@ import tempfile
 import stat
 
 from .storage import LoopError, digest, now, write_json
-from .vault_layout import slug, validate_relative, validate_metadata, validate_document_path, validate_mapping
+from .vault_layout import (slug, display_title, id_suffix, ROLE_FOLDERS, HISTORY_FOLDERS,
+                           validate_relative, validate_metadata, validate_document_path, validate_mapping)
 
 
 MAX_EXPORT_FILE = 8 * 1024 * 1024
@@ -43,10 +44,10 @@ def _read_regular(path, limit=MAX_EXPORT_FILE):
         return bytes(raw),digest({'content':hashlib.sha256(raw).hexdigest(),'executable':bool(info.st_mode & 0o111)})
 
 
-def read_export_json(path, default=None):
+def read_export_json(path, default=None, *, limit=MAX_EXPORT_JSON):
     """Missing is optional; links, FIFOs, malformed and oversized files are not."""
     try:
-        raw,_=_read_regular(path,MAX_EXPORT_JSON)
+        raw,_=_read_regular(path,limit)
     except FileNotFoundError:
         return default
     try:
@@ -138,20 +139,6 @@ def _local_view(text, knowledge, kind, key):
     return text.replace('[Full record](' + key + '.json)', '[현재 파생 JSON 기록](<' + uri + '>)').replace('[전체 기록](' + key + '.json)', '[현재 파생 JSON 기록](<' + uri + '>)')
 
 
-def _board_frontmatter(knowledge, kind, record, body):
-    """JSON is a single YAML-compatible flow value, never executable markup."""
-    envelope = {'version': 1, 'kind': kind, 'id': record['id'],
-                'knowledge_home': str(knowledge.home.resolve()), 'record': record}
-    return '---\nloop_work: ' + json.dumps(envelope, ensure_ascii=True, separators=(',', ':')) + '\n---\n' + body
-
-
-def _prefix_board_body(content, prefix):
-    header, separator, body = content.partition('\n---\n')
-    if content.startswith('---\nloop_work: ') and separator:
-        return header + separator + prefix + body
-    return prefix + content
-
-
 class VaultExporter:
     def __init__(self, knowledge, root):
         self.knowledge = knowledge
@@ -162,43 +149,33 @@ class VaultExporter:
         self.manifest = knowledge.home / 'vault-owned.json'
         self.marker = knowledge.home / ('vault-export-initialized-' + digest(self.target_identity)[:32] + '.json')
 
-    def _path(self, logical, proposed, legacy=None):
+    def _path(self, logical, proposed):
         paths = self.inventory['paths']
-        if logical not in paths:
-            paths[logical] = legacy if legacy and (legacy in self.inventory['files'] or os.path.lexists(self.root / legacy)) else proposed
-        selected = validate_mapping(logical, paths[logical])
+        selected = validate_mapping(logical, paths.setdefault(logical, proposed))
         if any(other != logical and target == selected for other, target in paths.items()):
             raise LoopError('Vault logical documents cannot share a frozen path')
-        if logical.startswith('snapshot:') and not selected.endswith(logical.rsplit(':',1)[1][:20] + '.md'):
-            raise LoopError('Vault snapshot path identity mismatch')
-        if logical.startswith('history:') and not selected.endswith(logical.rsplit(':',1)[1] + '.md'):
-            raise LoopError('Vault history path identity mismatch')
         return selected
 
     def _project(self, project_id):
-        project = self.knowledge.get('project', project_id, required=False) or {}
-        name = slug(project.get('name') or project_id, project_id)
-        mapped = self.inventory['paths'].setdefault('project:' + project_id, 'projects/' + name)
-        validate_relative(mapped)
-        if not mapped.startswith('projects/') or len(mapped.split('/')) != 2 or not mapped.endswith('--' + project_id):
-            raise LoopError('Vault project layout identity mismatch')
+        project = self.knowledge.get('project', project_id, required=False) or {'name':'프로젝트'}
+        mapped = self._path('project:' + project_id, '프로젝트/' + slug(display_title(project), project_id))
         return mapped.split('/')[1]
 
     def _base(self, project_id, task):
-        legacy = 'projects/' + _safe(project_id) + '/tasks/' + _safe(task['id']) + '/'
         logical = 'task:' + project_id + ':' + task['id']
-        primary = self._path(logical, 'projects/' + self._project(project_id) + '/tasks/' + slug(task['title'], task['id']) + '/현재-' + slug(task['title'], task['id']) + '.md', legacy + 'current.md')
-        return primary.rsplit('/', 1)[0] + '/', primary, legacy
+        primary = self._path(logical, '프로젝트/' + self._project(project_id) + '/작업/' + slug(display_title(task), task['id']) + '/진행 현황.md')
+        return primary.rsplit('/', 1)[0] + '/', primary
 
-    def _add(self, documents, path, kind, record, body, role, project_id=None, task_id=None, legacy=False):
+    def _topic_path(self, value):
+        project_id = value.get('project_id') if value.get('scope') != 'global' else None
+        prefix = '프로젝트/' + self._project(project_id) + '/지식/' if project_id else '공통 지식/'
+        return self._path('topic:' + value['id'], prefix + slug(display_title(value), value['id']) + '.md')
+
+    def _add(self, documents, path, kind, record, body, role, project_id=None, task_id=None):
         descriptor = dict(kind=kind, id=record['id'], role=role, project_id=project_id, task_id=task_id)
-        if legacy:
-            content = _board_frontmatter(self.knowledge, kind, record, body) if role == 'current' or kind == 'human-request' else body
-        else:
-            envelope = dict(version=2, knowledge_home=str(self.knowledge.home.resolve()), record=record, **descriptor)
-            validate_document_path(path, envelope)
-            content = '---\nloop_work: ' + json.dumps(envelope, ensure_ascii=True, separators=(',', ':')) + '\n---\n' + body
-        documents[path] = content
+        envelope = dict(version=3, knowledge_home=str(self.knowledge.home.resolve()), record=record, **descriptor)
+        validate_document_path(path, envelope)
+        documents[path] = '---\nloop_work: ' + json.dumps(envelope, ensure_ascii=False, separators=(',', ':')) + '\n---\n' + body
         self.inventory['documents'][path] = descriptor
 
     def _index(self, documents, path, record, links, project_id=None, task_id=None, kind=None):
@@ -231,50 +208,59 @@ class VaultExporter:
         self._add(documents,path,kind or ('task' if task_id else ('project' if project_id else 'topic')),record,body,'index',project_id,task_id)
         return documents[path]
 
+    def _project_index(self, project_id):
+        project = self.knowledge.get('project',project_id,required=False) or {'id':project_id,'name':'프로젝트'}
+        path = '프로젝트/' + self._project(project_id) + '/목록.md'
+        links = []
+        for task in self.knowledge.list('task'):
+            if project_id in (task.get('project_ids') or ['unassigned']):
+                _, target = self._base(project_id,task)
+                links.append(('작업 · ' + display_title(task),os.path.relpath(self.root/target,(self.root/path).parent).replace(os.sep,'/')))
+        for topic in self.knowledge.list('topic'):
+            if topic.get('scope') != 'global' and topic.get('project_id') == project_id:
+                target = self._topic_path(topic)
+                links.append(('지식 · ' + display_title(topic),os.path.relpath(self.root/target,(self.root/path).parent).replace(os.sep,'/')))
+        self._index({},path,project,links,project_id,kind='project')
+
+    @staticmethod
+    def _record_date(record):
+        value = str(record.get('updated_at') or record.get('created_at') or '')
+        return value[:10] if re.match(r'^[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T|$)',value) else '날짜미상'
+
     def _task(self, task_id, documents):
         from .writing import task_document
         task = self.knowledge.get('task', task_id)
         value = {**task, 'delegations': self.knowledge.delegations(task_id)}
         snapshot = digest(value)
         cutoff = task.get('updated_at') or task.get('created_at') or snapshot
-        body = _local_view(task_document(value, language='ko'), self.knowledge, 'task', task_id) + ('\n## 내보내기 범위\n\n기준 시점: ' + str(cutoff) + '\n\nSQLite/JSON이 원본 기록입니다. 이 문서는 승인이나 품질 검증 통과를 부여하지 않습니다.\n근거 경로는 원래 로컬 산출물 없이 이식 가능하지 않습니다.\n원본 데이터베이스: ' + str(self.knowledge.path) + '\n기록 해시: ' + snapshot + '\n')
+        body = _local_view(task_document(value, language='ko'), self.knowledge, 'task', task_id)
+        body += ('\n<details>\n<summary>내보내기 정보</summary>\n\n기준 시점: ' + str(cutoff)
+                 + '\n\nSQLite/JSON이 실행·권한·검증의 원본입니다. 이 문서는 승인이나 품질 검증 통과를 부여하지 않습니다.\n'
+                 + '로컬 근거에는 원래 산출물이 필요합니다.\n\n원본 데이터베이스: ' + str(self.knowledge.path)
+                 + '\n\n기록 해시: ' + snapshot + '\n\n</details>\n')
         for project_id in task.get('project_ids') or ['unassigned']:
-            base, primary, legacy = self._base(project_id, task)
-            old = primary == legacy + 'current.md'
-            self._add(documents, primary, 'task', task, body, 'current', project_id, task_id, old)
+            self.index_projects.add(project_id)
+            base, primary = self._base(project_id, task)
+            self._add(documents, primary, 'task', task, body, 'current', project_id, task_id)
             complete = task.get('phase') == 'completed' and (task.get('result') or {}).get('evidence_current') is not False
             role = 'final' if complete else 'interim'
             name = self._path('snapshot:' + project_id + ':' + task_id + ':' + snapshot,
-                (legacy + role + '/' + snapshot[:20] + '.md') if old else base + role + '/' + ('완료-' if complete else '중간-') + slug(task['title'],task_id) + '-' + snapshot[:20] + '.md',
-                legacy + role + '/' + snapshot[:20] + '.md')
+                              base + '기록/' + HISTORY_FOLDERS[role] + '/' + self._record_date(task) + '-' + HISTORY_FOLDERS[role] + '-' + snapshot[:20] + '.md')
             notice = '과거 완료 시점의 기록입니다. 현재 문서의 최신성과 품질 검증을 별도로 확인하세요.\n\n' if complete else ''
             if name in self.inventory['files']:
                 self.immutable_paths.add(name)
             else:
-                self._add(documents, name, 'task', task, notice + body, role, project_id, task_id, old)
+                self._add(documents, name, 'task', task, notice + body, role, project_id, task_id)
             for index, historical in enumerate(self.knowledge.history('task', task_id), 1):
                 hr = 'final' if historical.get('phase') == 'completed' and (historical.get('result') or {}).get('evidence_current') is not False else 'interim'
                 hd = digest(historical)[:20]
                 name = self._path('history:' + project_id + ':' + task_id + ':' + str(index) + ':' + hd,
-                    (legacy + hr + '/history-' + str(index) + '-' + hd + '.md') if old else base + hr + '/이력-' + slug(task['title'],task_id) + '-' + str(index) + '-' + hd + '.md', legacy + hr + '/history-' + str(index) + '-' + hd + '.md')
+                                  base + '기록/' + HISTORY_FOLDERS[hr] + '/' + self._record_date(historical) + '-이력-' + str(index).zfill(3) + '-' + hd + '.md')
                 if name in self.inventory['files']:
                     self.immutable_paths.add(name)
                 else:
-                    previous = '과거 작업 기록입니다. 당시 위임 상태를 현재 기록으로 재구성하지 않습니다. 현재 완료 판정은 별도 확인이 필요합니다.\n\n' + _local_view(task_document(historical, language='ko'), self.knowledge, 'task', task_id)
-                    self._add(documents,name,'task',historical,previous,hr,project_id,task_id,old)
-            # A readable index is a navigation-only compatibility view, never another current.
-            index_path = self._path('index:task:' + project_id + ':' + task_id, 'projects/' + self._project(project_id) + '/작업색인/' + slug(task['title'],task_id) + '.md')
-            relative = os.path.relpath(self.root / primary, (self.root / index_path).parent).replace(os.sep, '/')
-            self._index(documents,index_path,task,[('현재 작업 기록',relative)],project_id,task_id)
-            project = self.knowledge.get('project',project_id,required=False) or {'id':project_id,'name':project_id}
-            project_index = 'projects/' + self._project(project_id) + '/프로젝트색인.md'
-            # Read committed tasks, rather than discarding earlier index entries on each export.
-            links=[]
-            for other in self.knowledge.list('task'):
-                if project_id in (other.get('project_ids') or ['unassigned']):
-                    _, target, _ = self._base(project_id,other)
-                    links.append((str(other.get('title') or other['id']).replace('[','').replace(']',''),os.path.relpath(self.root/target,(self.root/project_index).parent).replace(os.sep,'/')))
-            self._index(documents,project_index,project,links,project_id)
+                    previous = '과거 작업 기록입니다. 당시 위임 상태를현재 기록으로 재구성하지 않습니다. 현재 완료 판정은 별도 확인이 필요합니다.\n\n' + _local_view(task_document(historical, language='ko'), self.knowledge, 'task', task_id)
+                    self._add(documents,name,'task',historical,previous,hr,project_id,task_id)
         return value
 
     def export(self, kind, key):
@@ -295,9 +281,11 @@ class VaultExporter:
                 prior_export = any(isinstance(item, dict) and isinstance(item.get('vault'), str) and os.path.normpath(item['vault']) == self.target_identity and (item.get('status') in ('ok','conflict') or item.get('changed')) for item in entries.values())
                 if os.path.lexists(self.marker) or prior_export:
                     raise LoopError('Vault ownership inventory is missing after prior export; existing files and absence preserved')
-            manifest = read_export_json(self.manifest, {'version': 1, 'vault': str(self.root), 'files': {}})
+            manifest = read_export_json(self.manifest, {'version': 1, 'layout_version':3, 'vault': str(self.root), 'files': {}})
             if manifest.get('version') != 1 or manifest.get('vault') != str(self.root) or not isinstance(manifest.get('files'), dict):
                 raise LoopError('Vault ownership manifest changed; existing notes preserved')
+            if manifest.get('layout_version') != 3:
+                raise LoopError('Vault layout requires explicit reorganization; run scripts/reorganize_vault.py --plan first. Existing notes preserved')
             original_manifest = digest(manifest)
             for field in ('paths','documents','reservations'):
                 if not isinstance(manifest.setdefault(field, {}), dict):
@@ -308,46 +296,45 @@ class VaultExporter:
                 validate_mapping(logical, path)
             if len(set(manifest['paths'].values())) != len(manifest['paths']):
                 raise LoopError('Vault logical documents cannot share a frozen path')
-            manifest['layout_version'] = 2
+            manifest['layout_version'] = 3
             self.inventory = manifest
             self.immutable_paths = set()
             self.indexes = []
+            self.index_projects = set()
             documents = {}
             value = self.knowledge.get(kind, key)
             if kind == 'task':
                 self._task(key, documents)
             elif kind == 'topic':
                 project_id = value.get('project_id') if value.get('scope') != 'global' else None
-                scope = value.get('scope', 'global')
-                _safe(scope)
-                prefix = ('projects/' + self._project(project_id) + '/topics/' + (scope + '/' if scope != 'project' else '')) if project_id else 'topics/' + scope + '/'
-                proposed = prefix + slug(value['summary'],key) + '.md'
-                note = self._path('topic:' + key, proposed, 'topics/' + key + '.md')
-                body = _local_view(topic_document(value, language='ko'), self.knowledge, 'topic', key) + '\n파생 지식 문서입니다. 로컬 근거에는 원래 산출물이 필요하며 승인 권한을 부여하지 않습니다.\n'
-                self._add(documents,note,'topic',value,body,'topic',project_id, value.get('task_id'),note == 'topics/' + key + '.md')
-                index = self._path('index:topic:' + key,prefix + '색인-' + slug(value['summary'],key) + '.md')
-                relative = os.path.relpath(self.root/note,(self.root/index).parent).replace(os.sep,'/')
-                self._index(documents,index,value,[('지식 기록',relative)],project_id,value.get('task_id'),kind='topic')
+                note = self._topic_path(value)
+                if project_id:
+                    self.index_projects.add(project_id)
+                body = _local_view(topic_document(value, language='ko'), self.knowledge, 'topic', key)
+                body += '\n파생 지식 문서입니다. 로컬 근거에는 원래 산출물이 필요하며 승인 권한을 부여하지 않습니다.\n'
+                self._add(documents,note,'topic',value,body,'topic',project_id,value.get('task_id'))
             elif value.get('task_id'):
+                from .writing import record_document
                 task = self._task(value['task_id'], documents)
                 for project_id in task.get('project_ids') or ['unassigned']:
-                    base, primary, legacy = self._base(project_id, task)
-                    folder = 'delegations/' if kind == 'delegation' else 'records/' + kind + '/'
-                    title = value.get('title') or value.get('summary') or value.get('question') or (value.get('request') or {}).get('instruction') or task['title']
-                    note = self._path(kind + ':' + project_id + ':' + key, (legacy + folder + key + '.md') if primary == legacy + 'current.md' else base + folder + slug(title,key) + '.md',legacy + folder + key + '.md')
-                    if kind == 'delegation':
-                        body = _local_view(delegation_document(value, language='ko'),self.knowledge,kind,key)
-                    elif kind in ('team','human-request','feedback','retirement'):
-                        body = '# ' + str(title).replace('\n',' ') + '\n\n## 원본 기록\n\n```json\n' + json.dumps(value,ensure_ascii=False,indent=2).replace('```','\\u0060\\u0060\\u0060') + '\n```\n\n파생 기록입니다. 승인·완료 권한을 부여하지 않습니다.\n'
-                    else:
+                    base, primary = self._base(project_id, task)
+                    if kind not in ROLE_FOLDERS:
                         continue
-                    self._add(documents,note,kind,value,body,kind,project_id,value['task_id'],note == legacy + folder + key + '.md')
+                    note = self._path(kind + ':' + project_id + ':' + key,
+                                      base + '기록/' + ROLE_FOLDERS[kind] + '/' + slug(display_title(value),key) + '.md')
+                    rendered = delegation_document(value,language='ko') if kind == 'delegation' else record_document(value,kind,language='ko')
+                    body = _local_view(rendered,self.knowledge,kind,key)
+                    self._add(documents,note,kind,value,body,kind,project_id,value['task_id'])
+            for project_id in sorted(self.index_projects):
+                self._project_index(project_id)
             if not documents:
                 return {'enabled': True, 'status': 'unchanged', 'vault': str(self.root), 'errors': []}
             manifest['source_revision'] = source_revision
             for name, descriptor in manifest['documents'].items():
                 if name in documents and descriptor.get('role') == 'current':
-                    documents[name] = _prefix_board_body(documents[name], '최종 내보내기 기준: ' + json.dumps(source_revision,sort_keys=True) + '\n이 문서는 저장된 데이터보다 늦을 수 있습니다. 최신성은 내보내기 상태와 함께 확인하세요.\n\n')
+                    documents[name] += ('\n<details>\n<summary>출력 최신성 정보</summary>\n\n최종 내보내기 기준: '
+                                        + json.dumps(source_revision,sort_keys=True)
+                                        + '\n\n이 문서는 저장된 데이터보다 늦을 수 있습니다. 최신성은 내보내기 상태와 함께 확인하세요.\n\n</details>\n')
             errors, changed = [], []
             for name in sorted(self.immutable_paths):
                 try:
@@ -356,7 +343,7 @@ class VaultExporter:
                 except (LoopError, OSError) as exc:
                     errors.append(str(exc))
             # Human-owned notes and Obsidian settings are outside this inventory.
-            _directory(self.root / 'notes')
+            _directory(self.root / '개인 메모')
             marker = {'version':1, 'vault':self.target_identity}
             retained_marker = read_export_json(self.marker)
             if retained_marker is not None and retained_marker != marker:
@@ -391,6 +378,31 @@ class VaultExporter:
                     content = self._index_content(*args, verified)
                     publish(path, content)
                 except (LoopError, OSError, ValueError, TypeError) as exc:
+                    errors.append(str(exc))
+            # Wiki notes are human-owned prose. Create once only after a current
+            # execution document was actually verified; never shadow a conflict.
+            from .wiki import ensure as ensure_wiki
+            for name in sorted(verified):
+                descriptor=manifest['documents'].get(name,{})
+                if descriptor.get('role')=='index' and descriptor.get('kind')=='project':
+                    try:
+                        project_id=descriptor['project_id']
+                        project=self.knowledge.get('project',project_id,required=False) or {'id':project_id,'name':'프로젝트'}
+                        project_base=manifest['paths']['project:'+project_id]+'/'
+                        ensure_wiki(self.knowledge,self.root,manifest,'project',project,project_id,project_base,name)
+                    except (LoopError,OSError,UnicodeError,KeyError) as exc:
+                        errors.append(str(exc))
+                    continue
+                if descriptor.get('role')!='current':
+                    continue
+                try:
+                    task=self.knowledge.get('task',descriptor['id'])
+                    project_id=descriptor['project_id']
+                    project=self.knowledge.get('project',project_id,required=False) or {'id':project_id,'name':project_id}
+                    project_base=manifest['paths']['project:'+project_id]+'/'
+                    ensure_wiki(self.knowledge,self.root,manifest,'project',project,project_id,project_base,project_base+'목록.md' if project_base+'목록.md' in verified else name)
+                    ensure_wiki(self.knowledge,self.root,manifest,'task',task,project_id,name.rsplit('/',1)[0]+'/',name)
+                except (LoopError,OSError,UnicodeError,KeyError) as exc:
                     errors.append(str(exc))
             if not self.manifest.exists() or digest(manifest) != original_manifest:
                 # Revalidate the retained inventory immediately before publication.

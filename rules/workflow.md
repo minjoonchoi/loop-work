@@ -80,10 +80,10 @@ retain and recover stale results instead of silently resealing them.
 
 ## 1. Capture the target and discover context
 
-For a new ordinary development request, run this command yourself:
+For a new explicitly invoked development task, run this command yourself:
 
 ```sh
-python3 "$ENTRYPOINT" --knowledge-home "$KNOWLEDGE_HOME" --root "$PROJECT_ROOT" init goal-id --title "Desired result" --implementer codex --orchestrator codex --session SESSION_ID
+python3 "$ENTRYPOINT" --knowledge-home "$KNOWLEDGE_HOME" --root "$PROJECT_ROOT" init goal-id --explicit-skill --title "Desired result" --implementer codex --orchestrator codex --session SESSION_ID
 ```
 
 Set `--orchestrator claude` inside Claude Code. The worker defaults to the same
@@ -147,6 +147,13 @@ Record the permission/setup needed to avoid interactive prompts during execution
 Pre-existing hooks may still run. Inspect their behavior; do not disable managed
 controls. Missing credentials or required infrastructure must be resolved now.
 
+For asynchronous GUI editing, approval or close changes, include a short state-combination
+table in the existing plan, selecting only affected boundaries. Link each row to its
+criterion: input/saved/composing; before-dispatch/committed/lost-response; close/cancel/
+reopen; preserved value/prohibited side effect; fixture/command and evidence scope
+(renderer, actual native, synthetic event or physical input). Reuse current checks and
+explicit limits. Simple work needs no separate PRD, new reviewer roles/count or gate.
+
 ## 3. Cross-review and freeze the executable contract
 
 ```sh
@@ -173,6 +180,14 @@ rules and gate-engine hashes. Start refuses stale code/context. Do not implement
 product code before start. Goal/discovery drafting is preflight work.
 
 ## 4. Execute the entire loop without further user questions
+
+The contract freezes `execution.check_failure_policy` before start. New templates use
+`fail_fast`: a failed check stops later invocations. `diagnostic_continue` explicitly
+runs later diagnostics; absent fields preserve legacy continuation without rewriting
+frozen inputs. Gate `checks` holds actual executions; `not_run_checks` records `id`,
+`reason` and `after_check` for a known-failure stop. Skipped checks never pass. Preserve
+cancellation, timeout and budget causes. The final fresh-check/review requirement below
+is unchanged; partial/stale passes or budget resets cannot substitute.
 
 Repeat until the goal is complete:
 
@@ -234,6 +249,9 @@ the exact recovery condition. New requirements start a new preflight goal.
 
 ## 5. Completion, interruption and delivery
 
+After verified completion, follow the [한국어 하네스 사용 회고](writing.md#작업-완료-후-하네스-사용-회고)
+without changing completed source, frozen criteria or delivery permissions.
+
 - Only `finish` can create `completed`. A reviewer saying "done", a commit, or green
   unit tests alone cannot. Check `status` and require current evidence before reporting.
 - Honor the frozen delivery boundary. If a commit changes HEAD after a gate, gate
@@ -278,3 +296,8 @@ criterion coverage and current contribution/evidence pins. Stale retirement rest
 the barrier; refresh by appending a new validated receipt. Never use retirement to skip
 latest substantive feedback consumption, milestone criteria or fresh final gates.
 No rule here guarantees host-hook or daemon-driven automatic resumption.
+
+Use `--explicit-skill` only for an actual explicit skill task, not technical memory
+capture. Ordinary prompts may contribute scoped project topics under `context.md`
+without starting a goal/session or consuming a gate/worker budget. A later task
+references original topic evidence and does not convert it into user approval.

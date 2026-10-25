@@ -7,7 +7,7 @@ import platform
 import uuid
 
 from . import benchmark, bench_report, bench_improvements, bench_evolution
-from .storage import LoopError, file_hash, write_json
+from .storage import LoopError, file_hash, write_json, write_text
 
 
 def check(models, efforts, *, candidate=None, suite=None, providers=None,
@@ -24,9 +24,6 @@ def check(models, efforts, *, candidate=None, suite=None, providers=None,
                   'effort': efforts.get(judge_provider) if judge_effort is None else judge_effort, 'repeats': judge_repeats}
     output = Path(output).resolve() if output else candidate.parent / 'loop-work-benchmarks' / (
         datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid.uuid4().hex[:8])
-    spec = benchmark.prepare(suite, candidate, models, providers, repeats, seed, environment, efforts, evaluation,
-                             routing_profile, trial_plan, output)
-    spec['source'] = {k: {'hash': v['hash']} for k, v in spec['source'].items()}
     if output.exists() or output.is_relative_to(candidate) or output.is_relative_to(suite.parent):
         raise LoopError('Use a new benchmark output directory outside source/suite trees')
     history = bench_evolution.location(candidate, history)
@@ -36,6 +33,19 @@ def check(models, efforts, *, candidate=None, suite=None, providers=None,
             or history.is_relative_to(output) or output.is_relative_to(history)):
         raise LoopError('Keep benchmark history outside source, suite and individual output trees')
     started = bench_evolution.read_history(history)
+    try:
+        spec = benchmark.prepare(suite, candidate, models, providers, repeats, seed, environment, efforts, evaluation,
+                                 routing_profile, trial_plan, output)
+    except benchmark.SetupPreflightError as exc:
+        if dry_run:
+            raise
+        result = {'phase': 'preflight', 'verdict': 'inconclusive', 'passed': False,
+                  'failure': {'phase': 'preflight', 'error': str(exc)}, 'output': str(output),
+                  'setup_protocol': benchmark.SETUP_PROTOCOL, 'model_calls': 0, 'evolution': None}
+        write_json(output / 'check.json', result)
+        write_text(output / 'improvements.md', '# Benchmark inconclusive\n\nSource preflight failed; no model calls or baseline promotion.\n')
+        return result
+    spec['source'] = {k: {'hash': v['hash']} for k, v in spec['source'].items()}
     if dry_run:
         return {**spec, 'dry_run': True, 'output': str(output), 'history': str(history),
                 'saved_profiles': len(started['baselines'])}
@@ -55,6 +65,8 @@ def check(models, efforts, *, candidate=None, suite=None, providers=None,
                   'evolution': summary,
                   'evolution_hash': file_hash(output / 'evolution.json') if (output / 'evolution.json').exists() else None,
                   'improvements': str(output / 'improvements.md')}
+        if phase == 'preflight':
+            result.update(setup_protocol=benchmark.SETUP_PROTOCOL, model_calls=0)
         write_json(output / 'check.json', result)
         bench_improvements.write_report(output, spec, value, failure)
         return result
@@ -78,6 +90,8 @@ def check(models, efforts, *, candidate=None, suite=None, providers=None,
             result = finish(compared, None, 'completed')
         return result
     except (LoopError, OSError, ValueError) as exc:
+        if isinstance(exc, benchmark.SetupPreflightError):
+            phase = 'preflight'
         failure = {'phase': phase, 'error': str(exc)}
         # Only reuse evidence after the same hash checks as an ordinary report.
         if (output / 'index.json').is_file():

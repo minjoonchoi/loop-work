@@ -148,15 +148,15 @@ class HumanInstallationTests(unittest.TestCase):
             result = subprocess.run([sys.executable, '-B', str(helper), 'human', '--help'],
                                     cwd=self.root, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn('serve', result.stdout)
+            self.assertIn('respond', result.stdout)
+            self.assertNotIn('serve', result.stdout)
             self.assertFalse((project / provider / 'skills/loop-human').exists())
         destination = self.root / 'runtime'
         result = runtime.snapshot(destination)
         self.assertEqual(result['engine_digest'], storage.engine_digest())
         expected = benchmark.source_snapshot(SOURCE)['files']
-        self.assertFalse(any(name.startswith('skills/loop-human/') for name in expected))
-        for name in ('loop_work/human.py', 'loop_work/human_ui.py', 'loop_work/human_ui_assets/index.html',
-                     'loop_work/human_ui_assets/app.js', 'loop_work/human_ui_assets/style.css', 'rules/human.md'):
+        self.assertFalse(any(name.startswith('skills/loop-human/') or name.startswith('loop_work/human_ui_assets/') for name in expected))
+        for name in ('loop_work/human.py', 'loop_work/human_ui.py', 'loop_work/board_ui.py', 'rules/human.md'):
             self.assertIn(name, expected)
             self.assertEqual((destination / name).read_bytes(), (SOURCE / name).read_bytes())
         result = subprocess.run([sys.executable, '-B', str(destination / 'skills/loop-work/loop.py'), 'human', '--help'],
@@ -175,3 +175,28 @@ class HumanInstallationTests(unittest.TestCase):
             with self.assertRaisesRegex(storage.LoopError, 'installation or state'):
                 benchmark.load_suite(path)
             skill.unlink()
+
+    def old_browser_copy(self,project):
+        installer.install(project)
+        manifest_path=project/'.loop/install.json';manifest=json.loads(manifest_path.read_text())
+        for name in ('index.html','app.js','style.css'):
+            relative='.loop/loop_work/human_ui_assets/'+name;path=project/relative;path.parent.mkdir(exist_ok=True);path.write_text('historical managed browser '+name)
+            manifest['files'][relative]=storage.file_hash(path)
+        manifest_path.write_text(json.dumps(manifest))
+    def test_upgrade_retires_only_exact_owned_browser_assets_and_keeps_user_notes(self):
+        project=self.root/'project';project.mkdir();self.old_browser_copy(project)
+        note=project/'.loop/loop_work/human_ui_assets/user-note.md';note.write_text('사용자 노트')
+        installer.install(project)
+        self.assertEqual(note.read_text(),'사용자 노트')
+        for name in ('index.html','app.js','style.css'):self.assertFalse((note.parent/name).exists())
+        manifest=json.loads((project/'.loop/install.json').read_text());self.assertFalse(any('human_ui_assets' in name for name in manifest['files']))
+    def test_modified_retired_browser_asset_blocks_upgrade_before_any_write(self):
+        project=self.root/'project';project.mkdir();self.old_browser_copy(project)
+        manifest=project/'.loop/install.json';before=manifest.read_bytes();main=project/'.loop/loop.py';original=main.read_bytes()
+        asset=project/'.loop/loop_work/human_ui_assets/app.js';asset.write_text('사용자 변경')
+        with self.assertRaisesRegex(storage.LoopError,'Local changes'):installer.install(project)
+        self.assertEqual(manifest.read_bytes(),before);self.assertEqual(main.read_bytes(),original);self.assertEqual(asset.read_text(),'사용자 변경')
+    def test_unowned_obsolete_browser_files_are_not_claimed_or_deleted(self):
+        project=self.root/'project';project.mkdir();asset=project/'.loop/loop_work/human_ui_assets/app.js';asset.parent.mkdir(parents=True);asset.write_text('unowned user file')
+        installer.install(project);self.assertEqual(asset.read_text(),'unowned user file')
+        self.assertNotIn(str(asset.relative_to(project)),json.loads((project/'.loop/install.json').read_text())['files'])

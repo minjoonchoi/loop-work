@@ -64,28 +64,29 @@ def parser():
         if name == "proposal":
             sub.add_argument("--input", type=Path, required=True)
     board = commands.add_parser("board", help="Track and approve work from the Obsidian vault")
-    board_commands = board.add_subparsers(dest="board_command", required=True)
-    for name in ("serve", "list", "show"):
+    board_commands = board.add_subparsers(dest="board_command")
+    board.set_defaults(board_command="open",vault=None,project=None,session=None,task=None,port=0)
+    for name in ("open", "_desktop", "start", "status", "stop", "list", "show"):
         sub = board_commands.add_parser(name)
         sub.add_argument("--vault", type=Path, help="Explicit vault opt-in for a custom knowledge store")
+        sub.add_argument("--project", help="Restrict this board to one project")
         sub.add_argument("--session")
         sub.add_argument("--task")
-        if name == "serve":
+        if name in ("open", "_desktop", "start"):
             sub.add_argument("--port", type=int, default=0)
-            sub.add_argument("--no-open", action="store_true", help="Keep serving without opening a browser")
+        if name == "_desktop":
+            sub.add_argument("--target-root", type=Path)
         elif name == "show":
             sub.add_argument("id")
             sub.add_argument("--kind", choices=("task", "human-request"), default="human-request")
     human = commands.add_parser("human", help="Local human decisions and explicitly bounded actions")
     human_commands = human.add_subparsers(dest="human_command", required=True)
-    for name in ("list", "serve"):
+    for name in ("list",):
         sub = human_commands.add_parser(name)
         sub.add_argument("--session")
         sub.add_argument("--task")
         if name == "list":
             sub.add_argument("--include-closed", action="store_true")
-        else:
-            sub.add_argument("--port", type=int, default=0)
     human_commands.add_parser("show").add_argument("id")
     request = human_commands.add_parser("request")
     request.add_argument("task")
@@ -120,6 +121,7 @@ def parser():
     init.add_argument("--implementer", choices=("claude", "codex"), required=True)
     init.add_argument("--orchestrator", choices=("claude", "codex"), help="Conversation provider; defaults to implementer")
     init.add_argument("--session", help="Reuse the current conversation's session ID for the next goal")
+    init.add_argument("--explicit-skill", action="store_true", help="Record creation by an explicit loop-work prompt")
     session = commands.add_parser("session", help="Persist and reuse analysis in the current conversation")
     session_commands = session.add_subparsers(dest="session_command", required=True)
     session_commands.add_parser("open").add_argument("--provider", choices=("claude", "codex"), required=True)
@@ -167,6 +169,7 @@ def parser():
     opened.add_argument("--worker", choices=("claude", "codex"), help="Worker provider; defaults to conversation provider")
     opened.add_argument("--path", type=Path, action="append")
     opened.add_argument("--session")
+    opened.add_argument("--explicit-skill", action="store_true", help="Record creation by an explicit loop-work prompt")
     for name in ("delegate", "team"):
         delegated = work_commands.add_parser(name)
         delegated.add_argument("task")
@@ -250,8 +253,8 @@ def common_command(args, knowledge):
             root = repository(project_root(paths[0]))
             with locked(root):
                 return Engine(root, "goal-" + uuid.uuid4().hex[:12], knowledge).initialize(
-                    args.title, args.worker or args.provider, args.session, args.provider)
-        return work.open(args.kind, args.title, args.provider, paths, args.session, args.worker)
+                    args.title, args.worker or args.provider, args.session, args.provider, explicit_skill=args.explicit_skill)
+        return work.open(args.kind, args.title, args.provider, paths, args.session, args.worker, explicit_skill=args.explicit_skill)
     if cmd in ("delegate", "team"):
         return getattr(work, cmd)(args.task, read_json(args.input), args.path, args.recover)
     if cmd == "assess":
@@ -323,16 +326,34 @@ def main(argv=None, *, entrypoint=None):
             return 0 if output["passed"] else 1
         knowledge = KnowledgeBase(args.knowledge_home, vault_home=args.vault if args.command == "board" else None)
         if args.command == "board":
-            if args.board_command == "serve":
-                from .board_ui import serve
-                serve(knowledge,args.port,args.session,args.task,vault_home=args.vault,open_browser=not args.no_open)
-                return 0
+            if args.board_command == "_desktop":
+                from .desktop import helper
+                return helper(knowledge,args.port,args.session,args.task,args.project,target_root=args.target_root)
+            if args.board_command in ("open","start","status","stop"):
+                from .desktop import effective_project
+                args.project,unattached=effective_project(knowledge,args.project,entrypoint=entrypoint,create=args.board_command not in ("status","stop"))
+                if unattached:
+                    print(json.dumps({"status":"stopped","project_scope":"unattached"},ensure_ascii=False,indent=2));return 0
+            if args.board_command == "open":
+                from .desktop import open_app
+                output=open_app(knowledge,args.port,args.session,args.task,args.project,entrypoint=entrypoint)
+                print(json.dumps(output,ensure_ascii=False,indent=2)); return 0
+            if args.board_command in ("start","status","stop"):
+                from . import board_service
+                operation=getattr(board_service,args.board_command)
+                options=dict(session_id=args.session,task_id=args.task,project_id=args.project)
+                if args.board_command=="start": options.update(port=args.port)
+                output=operation(knowledge,**options)
+                # Capability-bearing descriptors remain internal to the native helper.
+                output={k:v for k,v in output.items() if k not in ("url","capability")}
+                print(json.dumps(output,ensure_ascii=False,indent=2))
+                return 0 if output.get("status")!="unknown" else 1
             from .board import Board
             desk = Board(knowledge,args.vault)
             if args.board_command == "list":
-                output = desk.list(args.session,args.task,True)
+                output = desk.list(args.session,args.task,True,**({"project_id":args.project} if args.project is not None else {}))
             else:
-                output = desk.show(args.id,args.kind)
+                output = desk.show(args.id,args.kind,**({"project_id":args.project} if args.project is not None else {}))
                 if ((args.session and output["record"].get("session_id") != args.session)
                         or (args.task and (output["record"].get("task_id") if args.kind == "human-request" else output["id"]) != args.task)):
                     raise LoopError("Document outside board scope")
@@ -342,10 +363,6 @@ def main(argv=None, *, entrypoint=None):
             from .human import HumanDesk
             desk = HumanDesk(knowledge)
             cmd = args.human_command
-            if cmd == "serve":
-                from .human_ui import serve
-                serve(knowledge, port=args.port, session_id=args.session, task_id=args.task)
-                return 0
             if cmd == "list":
                 output = desk.list(args.session, args.task, args.include_closed)
             elif cmd == "show":
@@ -396,7 +413,7 @@ def main(argv=None, *, entrypoint=None):
                 return 0
             engine = Engine(root, args.goal, knowledge)
             if cmd == "init":
-                output = engine.initialize(args.title, args.implementer, args.session, args.orchestrator)
+                output = engine.initialize(args.title, args.implementer, args.session, args.orchestrator, explicit_skill=args.explicit_skill)
             elif cmd in ("delegate", "team"):
                 output = getattr(engine, cmd)(read_json(args.input), args.recover)
             elif cmd == "assess":

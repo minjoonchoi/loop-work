@@ -30,8 +30,10 @@ class Engine:
         self.active_path = root / ".loop/state/active.json"
         self.knowledge = knowledge or KnowledgeBase()
 
-    def initialize(self, title, implementer, session_id=None, orchestrator=None):
+    def initialize(self, title, implementer, session_id=None, orchestrator=None, *, explicit_skill=False):
         concise(title, "Goal title", 120)
+        if type(explicit_skill) is not bool:
+            raise LoopError("explicit_skill must be a boolean creation option")
         orchestrator = orchestrator or implementer
         if self.goal_dir.exists() or self.state_dir.exists():
             raise LoopError(f"Goal already exists: {self.id}")
@@ -49,6 +51,8 @@ class Engine:
             "baseline_head": head(self.root), "findings": [], "gaps": []})
         state = {"version": 1, "id": self.id, "session_id": session.id, "phase": "draft", "created_at": now(),
                  "milestones": [], "attempts": {}, "notes": [], "latest_gate": None}
+        if explicit_skill:
+            state["provenance"] = {"version": 1, "source": "explicit_loop_work"}
         self.save(state, "initialized")
         return self.refresh()
 
@@ -393,8 +397,13 @@ class Engine:
                            for cid in item["check_ids"]}
         checks = [x for x in contract["checks"] if milestone is None
                   or x["id"] in selected_checks or x["kind"] == "regression"]
+        # Missing field belongs to legacy/frozen contracts and retains diagnostic continuation.
+        check_failure_policy = contract["execution"].get("check_failure_policy", "diagnostic_continue")
+        started_checks = set()
+        stopped_after_failure = None
         report = {"phase": phase, "milestone": milestone, "attempt": attempts + 1, "at": now(),
                   "passed": False, "checks": [], "review": None, "error": None,
+                  "check_failure_policy": check_failure_policy, "not_run_checks": [],
                   "feedback_revision": feedback["revision"],
                   "feedback_substantive_revision": feedback["substantive_revision"]}
         try:
@@ -403,6 +412,7 @@ class Engine:
                 remaining = self.remaining(state, contract)
                 if remaining <= 0:
                     raise LoopError("Execution budget exhausted")
+                started_checks.add(check["id"])
                 result = execute(check["argv"], inside(self.root, check["cwd"]), run_dir / "checks" / check["id"],
                                  min(check["timeout_seconds"], max(0.01, remaining)), cancel=cancel)
                 report["checks"].append({"id": check["id"], "passed": result["exit_code"] == 0 and not result["timed_out"] and not result.get("cancelled"),
@@ -410,11 +420,14 @@ class Engine:
                 if result.get("cancelled"):
                     report["cancelled"]=True
                     raise providers.Cancelled(result.get("cancel_reason") or "User interrupted this task")
+                if not report["checks"][-1]["passed"] and check_failure_policy == "fail_fast":
+                    stopped_after_failure = check["id"]
+                    break
             after_checks = snapshot(self.root)
             if after_checks["digest"] != before["digest"]:
                 raise LoopError("Checks changed repository inputs. Use ignored output paths; inspect changes and retry.")
             self.integrity(state, *self.load()[1:])
-            if all(x["passed"] for x in report["checks"]):
+            if len(report["checks"]) == len(checks) and all(x["passed"] for x in report["checks"]):
                 remaining = self.remaining(state, contract)
                 if remaining <= 0:
                     raise LoopError("Execution budget exhausted")
@@ -441,6 +454,12 @@ class Engine:
         except BaseException:
             self._block_internal("Gate interrupted; inspect logs before resume", retryable=True)
             raise
+        not_run_reason = ("cancelled" if report.get("cancelled") else
+                          "execution_budget_exhausted" if report["error"] == "Execution budget exhausted" else
+                          "known_check_failure" if stopped_after_failure else "gate_error")
+        report["not_run_checks"] = [{"id": check["id"], "reason": not_run_reason,
+                                     **({"after_check": stopped_after_failure} if stopped_after_failure else {})}
+                                    for check in checks if check["id"] not in started_checks]
         report_path = run_dir / "gate.json"
         state.pop("inflight", None)
         state["latest_gate"] = str(report_path)

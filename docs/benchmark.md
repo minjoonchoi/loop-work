@@ -331,6 +331,16 @@ call ledger와 대조하며, 누락·중복·미완료 호출은 `calls_complete
 감지하는 guard이며, 모든 악의적 교체나 metadata까지 복원한 변경을 탐지하는 연속 OS
 감시를 보장하지 않는다. 실패한 측정은 보존하며 전역 설정은 자동 수정하지 않는다.
 
+### 고립 설치·import 사전검사
+
+모델 호출 전 exported source가 동결 snapshot과 동일한지 확인하고 고립 trial 설치의 실제
+entrypoint import를 검사합니다. 사용자 HOME·호스트 설정은 바꾸지 않습니다. 실패는 원문과
+함께 inconclusive로 보존하며 모델 호출·judge·passing history 승격은 하지 않습니다.
+새 profile의 `setup_protocol="isolated-copy-install-v1"`은 기존 필드 없는 profile과 구분하며
+legacy hash·host fingerprint·rubric은 소급 변경하지 않습니다. `bench check` 사전검사 실패는
+`phase=preflight`, `verdict=inconclusive`, `model_calls=0`이며, preflight process 로그와
+`preflight/{arm}/result.json`을 보존합니다. judge·passing history로 승격하지 않습니다.
+
 ### 실행 전 trial 경로 고정
 
 `bench run`과 `bench check`의 선택 인자 `--trial-plan FILE`은 기존 seed로 생성한

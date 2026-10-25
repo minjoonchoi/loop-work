@@ -1,0 +1,1 @@
+{"identifier":"main","description":"로컬 번들 화면의 제한된 이벤트 수신","windows":["main"],"permissions":["core:event:allow-listen","core:event:allow-unlisten"]}

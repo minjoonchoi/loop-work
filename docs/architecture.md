@@ -105,7 +105,7 @@ The single `~/.loop-work/vault` is an additional document view, not a data migra
 
 ## Task binding
 
-Create the identified task with `work open` or development `init` first, then run
+Create the identified task with `work open --explicit-skill` or development `init --explicit-skill` first, then run
 `harness on --provider PROVIDER --session SESSION_ID --task TASK_ID`.
 The task must belong to that provider/session. `harness status ID` reads only that
 owned session; `harness off ID` releases routing without resetting tasks or budgets.
@@ -360,6 +360,11 @@ committed data intact; `knowledge get`/`work context` regenerates it. Confirmed 
 alone do not establish freshness; applicability is computed on context reads.
 These checks constrain shape and duplication, not factual or semantic writing quality.
 
+The [completion-use retrospective](../rules/writing.md#작업-완료-후-하네스-사용-회고) is an agent
+instruction, not a new runtime hook or gate. The coordinator reuses existing task/session
+provenance and knowledge context/remember/get to retain concise Korean observations and
+separate hypotheses; existing derived-view ownership and export diagnostics still apply.
+
 ## Development state machine
 
 | State | Entry condition | Allowed progress |
@@ -390,6 +395,12 @@ under `.loop/state/` are excluded. Ignored build caches/output are not verificat
 inputs. Declare critical ignored rules explicitly; do not keep implementation source
 or acceptance fixtures ignored. Submodules are rejected rather than silently omitted;
 run separate goals inside them.
+
+Contracts optionally freeze `execution.check_failure_policy`: new templates use
+`fail_fast`, explicit `diagnostic_continue` and field-absent legacy contracts continue.
+Actual `checks` and `not_run_checks` are separate; no skipped suffix can pass. The
+[workflow rule](../rules/workflow.md#4-execute-the-entire-loop-without-further-user-questions)
+owns scheduling and scoped GUI planning, not a new runtime gate or reviewer role.
 
 After successful checkpoints, subsequent implementation may change earlier files.
 Final finish always re-runs every check and obtains a new review of every acceptance
@@ -475,19 +486,38 @@ first context read. Reconciliation is request-driven, not a background watcher.
 
 The workspace helper keeps the single vault at `~/.loop-work/vault`; it does not
 move an existing database, change app-wide registration, or configure synchronization.
-New vault paths use readable project/task names with stable ID suffixes; current
-notes are named `현재-<title--ID>.md`, and snapshots include Korean stage labels,
-task descriptions and digests. Existing version-1 managed paths stay in place,
-including missing or edited notes: no new alias copy bypasses their ownership state.
-Korean project/topic/task indexes link those original files. Project-scoped topics
-live under their project; global topics under `topics/global`. IDs remain machine
-identity, while a frozen mapping prevents path churn after title changes. The outer
-ownership manifest stays version 1 with optional layout_version=2 path/document
-metadata, and new document frontmatter declares its role. Cutoff/source information
-remains part of each view. An authoritative completed record can produce a final snapshot, but
-that historical file never establishes current source freshness or grants QA authority.
-Topics and scoped worker/control records are separate derived views; human notes
-remain outside generated-file ownership.
+The runtime reads and writes a single Korean layout 3. Start at `안내.md`, then
+`프로젝트/<short name--8-character hash>/목록.md`. Project notes are `프로젝트 안내.md`;
+reusable conclusions live under `지식/`. Work folders use
+`작업/<short name--8-character hash>/진행 현황.md` and human-owned `작업 문서.md`.
+`기록/중간/` and `기록/완료/` retain cutoff snapshots; scoped records use the Korean
+`위임`, `협업`, `사용자 검토`, `피드백` and `종료` folders. Global knowledge is in
+`공통 지식/`; new personal notes belong in `개인 메모/`. Existing README/notes/settings
+are preserved. One project list replaces duplicate topic/task index files.
+
+The suffix disambiguates paths; metadata retains complete identities. Frozen mappings
+prevent path churn after title changes. The outer ownership manifest stays version 1
+with layout_version=3 and document envelope version 3. A separate preserving conversion
+tool handles old exports; current reader/writer code has no legacy-format branch or
+alias. Edited, missing or unowned files cannot regain authority through a fresh copy.
+Conversion retains original managed documents, human wiki text and ownership evidence
+in a vault-external backup, then removes the old managed layout from the vault tree.
+Only generated source links in wiki bodies change; unowned notes and settings stay
+in place. Conflicted, missing or reserved paths reject the entire conversion.
+
+Optional topic `title` is a one-line bounded presentation field, preserved by knowledge
+recording. New authoring requires a concise Korean noun phrase of at most 60 characters.
+Historical records need no statement rewrite; `display_title` shows a marked short
+excerpt, while the complete `summary` appears under `결론`. Documents present purpose,
+observations, scope/uncertainty and evidence in reading order. Long identifiers and raw
+JSON belong in folded original/verification details. Human request questions, every
+choice and response remain readable with literal line boundaries; their full JSON is
+also retained. Rendering does not change execution or approval authority.
+
+Cutoff/source information remains part of each view. An authoritative completed record
+can produce a completion snapshot; that historical file never establishes current source
+freshness or grants QA authority. Topics and scoped worker/control records are separate
+derived views; human notes remain outside generated-file ownership.
 
 Selected task/topic/delegation/team/human-request/feedback/retirement writes enqueue
 export only after their DB transaction commits. Standard shared knowledge homes use
@@ -709,18 +739,12 @@ manually executed, with existing pause, integrity and finite-budget checks prese
 It cannot run arbitrary commands or confer external authorization, QA completion or
 merge authority. The desk does not dispatch worker/model calls.
 
-`human_ui.py` serves vanilla assets from `loop_work/human_ui_assets/` on localhost.
-The CLI and browser use the same desk operations. Linked installs retain the single
-loop-work skill and its original adapter paths. Copied installs and fixed runtime
-snapshots include the human rule, backend and three UI assets; runtime/source seals
-include these dependencies. No separate human skill, global hooks, vendor settings
-or login state are required. The existing `scripts/loop.py human` CLI is unchanged.
+The text `human list|show|request|respond|execute` CLI uses the same desk operations as the native Board. Linked/copied installations retain the single loop-work skill, human rule and backend; no standalone human UI assets, separate skill, global hooks or login changes are required.
 
 ## Vault-backed board
 
 The first `board` skill argument routes to `rules/board.md` before activation; bare
-board selects serve. `board serve` starts the localhost UI and opens its actual URL
-in the default browser unless `--no-open` is supplied. It preserves the existing
+board selects open. On macOS, `board open` shows the Tauri 2/React desktop window over the authenticated internal API. `board start` prepares only a managed backend, without app/browser launch. Linux retains the non-GUI CLI. It preserves the existing
 entrypoint, knowledge home and session/task binding and never turns the harness on
 or off, selects a recent session, or creates a goal. The legacy human CLI remains
 compatible for request management.
@@ -735,10 +759,12 @@ request, its revision, the displayed vault revision and execution authority. The
 person supplies original response text; approval recording and explicit resume execution
 are distinct. A committed action followed by export failure is reported separately
 and must never trigger an automatic action replay. Bounded no-symlink discovery also
-shows vault-only task current documents read-only when absent from the ownership
-inventory; it grants no runtime authority. History failures are isolated per file.
-Task/session-scoped views and mutation receipts omit global per-record export
-identifiers, paths and errors, retaining only non-identifying diagnostic notices. Only the existing allowlisted
+shows uninventoried task current documents read-only only when a matching current
+runtime task has explicit-loop-work provenance. Documents without an eligible runtime
+task remain hidden; an absent ownership pin grants no action authority. History failures are isolated per file.
+All Board views and mutation receipts, including unscoped views, omit per-record
+export identifiers, titles, paths and errors, retaining only identifier-free aggregate
+diagnostics. Detailed CLI/KB export diagnostics remain available independently. Only the existing allowlisted
 resume action is executable; the board grants no shell, model dispatch or QA authority.
 
 ## Direct board steering for the bound task
@@ -762,3 +788,130 @@ remain unchanged; rendering does not translate old stored conclusions or infer f
 No Hangul validator or new QA/eligibility/budget rule is introduced. Later normal
 exports or an explicitly run install backfill may refresh generated views under
 existing ownership guards; this change does not sync actual user vault contents.
+
+## Project board and human-owned wiki documents
+
+`Board.projects(query, sort, session_id, task_id, project_id)` derives the displayed
+project inventory from actual scoped vault documents. Project selection applies in
+`_discover`, `_scan`, `_history`, document lookup and action guards before replicas
+are merged. A task shared by multiple projects therefore returns only the selected
+project's current/history/request paths. Runtime task membership also prevents a
+forged vault envelope from relabeling another runtime task into the selected project.
+Names and task bodies are never synthesized from a hidden runtime dashboard.
+
+Rows expose `display_title`, `board_state`, `state_label` and `review_reasons`.
+Pending human work, feedback pause and stale completion take precedence over a
+historical completed phase. Otherwise positively verified current completion, working/ready states and
+technical stop/abort are distinct. Superseded requests do not keep the review queue
+open. Common-work completion observations and recorded feedback stamps are checked
+without mutating task state. A display classification does not grant QA authority.
+
+`wiki.py` owns first-created, separately registered human prose. Its files use
+`loop_work_wiki` frontmatter rather than the execution `loop_work` envelope. The
+registry binds project/task IDs and frozen paths; it is not an alternative completion
+record. Export creates a wiki only after verifying a current document and thereafter
+preserves it, including external edits and deletion. `Board.wiki` and `save_wiki`
+return actual Markdown content independently of the execution document's ownership
+pin. The body API excludes the top display H1; serialization writes the display title
+and H1 together without changing the runtime title, project identity or path.
+
+Wiki saves use immutable operation receipts, an expected content/mode revision,
+no-follow bounded reads and exclusive publication. The displaced inode is retained
+as a recoverable revision. Detected concurrent replacements return `WikiConflict`
+with status 409; a fresh read and explicit merge can then save. This is not a claim
+of filesystem-wide CAS against noncooperating editors or of cross-file transactions.
+Neither wiki text, title, a successful save nor a restored display file can bypass
+original current/request pins, source freshness, finite budgets or human authority.
+
+개발 완료의 Board 표시는 저장된 `result.evidence_current`만으로 결정하지 않는다.
+작업의 실제 location root와 goal 범위에 있는 final `gate.json`을 크기 제한·심링크 비추종으로 읽어
+통과·final 단계·현재 소스 snapshot·현재 피드백 revision을 읽기 전용으로 대조한다.
+근거가 없거나 변경·안전성 검증 실패가 있으면 과거 완료 표시는 보존하되 사용자 확인 열에 둔다.
+이 조회는 Engine 상태 갱신이나 DB·vault 쓰기를 수행하지 않는다.
+
+위키 저장은 제출한 직렬화 문서를 독립된 revision 파일로 먼저 보존하고 게시 후
+관측 fingerprint와 대조한 뒤에만 성공 receipt를 작성합니다. 게시 직후 외부 수정이
+관측되면 충돌로 처리하여 외부 원문과 제출 초안이 서로 덮이지 않게 남깁니다.
+사람 위키의 최초 스냅샷은 시점·한계를 표시하며, 이후 실행 지식은 연결된 generated
+current/history 문서가 담당합니다. 목표와 실제 완료 결과를 사람 본문에 자동 덮어쓰지 않습니다.
+
+## Explicit task origin and memory-only inputs
+
+`Work.open` and `Engine.initialize` default to `explicit_skill=False`. Only the
+actual explicit skill branch passes true (`--explicit-skill` in the CLI), recording
+immutable `provenance={"version":1,"source":"explicit_loop_work"}`. This is
+cooperative invocation provenance, not cryptographic proof of a vendor UI action.
+Board task reads/actions require that runtime origin; Markdown cannot grant it.
+Absent/unknown legacy and low-level tasks remain stored without retrospective promotion.
+
+Relevant ordinary input can use existing `knowledge remember` as a project topic,
+without creating a task/session/binding or execution call through the memory write.
+Related ordinary-worded steering still follows the existing explicit task feedback
+and controls with its consumed budgets preserved. Evidence and scoped user
+basis remain original; known session IDs are optional and unknown IDs are omitted.
+There is no automatic all-prompt capture or transcript dump. A later explicit task
+selects the topic ID/revision and original sources as context without changing topic
+ownership or treating memory as execution, scope-change, approval or completion authority.
+
+Information-only projects can expose a zero-task project wiki only when an actual
+project-index Markdown document exists. Topic-only memory may remain in Obsidian
+without a Board project entry; the Board never substitutes a runtime DB project
+record for a missing vault index.
+
+
+## macOS desktop front end
+
+The default macOS installation builds a local Tauri 2/Rust application with React,
+shadcn, Motion, ECharts, ReactFlow and Rive using project-local npm/cargo dependencies. The user bundle is `~/Applications/Loop Work.app`;
+a TARGET install places it in `<project>/.loop/Loop Work.app`. Python backend code
+remains standard-library-only on macOS/Linux. Missing required build tools are reported without
+automatic global toolchain installation. No Dock pinning, login item or app-wide settings change
+is required. Linux retains the non-GUI CLI without claiming a native application install.
+
+The bundled React frontend reads the same vault-backed Board through the authenticated
+API-only loopback backend; Python serves no HTML or static frontend assets, and
+there is no new execution/approval authority, alternate project list or model provider.
+Runtime/KB/vault/project selection stays exact. Capability material remains in the private native launch/IPC channel, not bundle
+configuration or ordinary logs.
+Window close hides the app and reopen restores the window. Quit protects unsaved,
+composing, conflicted or uncertain drafts before exiting. App/window lifecycle is
+independent of task pause/resume, goals, feedback, approvals, caps and QA.
+
+The app helper starts a backend when needed and stops only its own newly created
+instance on quit/input EOF using matching identity. An app attached to an existing
+CLI-managed backend leaves it running. `board start` starts/reuses that managed
+backend without opening an app or browser; `status` and `stop` remain backend operations.
+Public browser/foreground serve modes are removed. The private authenticated API and bundled React renderer remain required; public lifecycle output never exposes a capability URL.
+
+
+### Native verification boundaries
+
+Keep shipping-binary evidence separate from the opt-in `native-qa` build, whose
+feature is off by default. The shipping startup/quit checks establish real bundled
+application launch and owned/reused/replacement backend lifetime; they do not alone
+establish populated-task editing, approval, control, visualization or physical input.
+The separate audit binary exercises an actual Tauri WebView through the existing
+Rust `board_request` bridge and Python API against an isolated populated vault. Its
+programmatic DOM, composition and media-query probes must be labelled
+`physical_gui_input_verified=false`; they are not physical keyboard or OS IME verification.
+Audit-only instrumentation must not become a normal frontend command or new approval
+path. The Python engine, authority checks, finite budgets and QA gates remain unchanged.
+Native/renderer checks do not establish model-quality or speed improvement; the retained
+benchmark comparison remains inconclusive unless its own gates establish otherwise.
+
+
+Close preparation holds a request-ID-scoped guard through awaited editor saves and
+native finish/cancel handling. After the await it rechecks all pending human/control
+operations, editor saving/dirty/composition/conflict/uncertainty and unsent drafts;
+late input invalidates a safe result. The actual native cancel callback releases only
+the matching request guard on the normal cancellation path. An expired or failed
+finish IPC ends that frontend attempt with a diagnostic and releases its own guard
+so editing remains available. A transient QA preparation probe releases its own guard
+without leaving the UI permanently locked.
+
+An uncertain human response or execution retains its original payload and runtime/vault
+pins. Only an explicit user retry first GETs the scoped current request: an authoritative
+matching receipt reconciles without POST; otherwise a fresh, unmodified, writable and
+exact prior record plus matching vault revision permits one resend of the original
+payload. Polling never resubmits. A newer draft is preserved; execute does not clear it,
+and respond clears only a draft still equal to the submitted original text.

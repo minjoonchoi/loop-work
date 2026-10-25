@@ -17,6 +17,19 @@ from scripts import install as installer
 from scripts import setup_workspace as setup
 
 
+@contextlib.contextmanager
+def allow_native_tools_but_forbid_brew():
+    # setup and the native builder import the same subprocess module. Preserve
+    # the no-Obsidian-install boundary without blocking the legitimate compiler.
+    original_run = subprocess.run
+    def checked_run(argv, *args, **kwargs):
+        if Path(argv[0]).name == "brew":
+            raise AssertionError("existing Obsidian must not invoke brew")
+        return original_run(argv, *args, **kwargs)
+    with patch.object(setup.subprocess, "run", side_effect=checked_run):
+        yield
+
+
 class WorkspaceSetupTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -44,7 +57,7 @@ class WorkspaceSetupTests(unittest.TestCase):
         settings = workspace.vault(self.home) / ".obsidian/app.json"
         settings.write_text('{"original":true}\n')
         settings.chmod(0o640)
-        before = {p: (p.read_bytes(), p.stat().st_mode, p.stat().st_ino) for p in (note, settings, workspace.vault(self.home) / "README.md")}
+        before = {p: (p.read_bytes(), p.stat().st_mode, p.stat().st_ino) for p in (note, settings, workspace.vault(self.home) / "안내.md")}
         second = workspace.ensure(self.home)
         self.assertTrue(first["created"])
         self.assertEqual(second["created"], [])
@@ -53,8 +66,28 @@ class WorkspaceSetupTests(unittest.TestCase):
         self.assertFalse((self.home / ".config").exists())
         self.assertFalse((self.home / "Library").exists())
 
+    def test_korean_guide_and_personal_notes_preserve_existing_readme_and_user_files(self):
+        vault = workspace.vault(self.home)
+        vault.mkdir(parents=True)
+        readme = vault / "README.md"
+        readme.write_text("기존 사람이 정리한 README\n")
+        notes = vault / "notes"
+        notes.mkdir()
+        original = notes / "원래 메모.md"
+        original.write_text("원문 메모\n")
+        before = {p: (p.read_bytes(), p.stat().st_ino) for p in (readme, original)}
+        workspace.ensure(self.home)
+        guide = vault / "안내.md"
+        self.assertIn("프로젝트/", guide.read_text())
+        self.assertIn("공통 지식/", guide.read_text())
+        self.assertTrue((vault / "개인 메모").is_dir())
+        guide.write_text("사용자가 바꾼 안내\n")
+        workspace.ensure(self.home)
+        self.assertEqual(guide.read_text(), "사용자가 바꾼 안내\n")
+        self.assertEqual(before, {p: (p.read_bytes(), p.stat().st_ino) for p in before})
+
     def test_all_conflicts_fail_before_any_app_or_workspace_mutation(self):
-        cases = ("root-file", "root-link", "data-file", "vault-link", "settings-file", "readme-link")
+        cases = ("root-file", "root-link", "data-file", "vault-link", "settings-file", "guide-link", "personal-notes-link")
         for name in cases:
             with self.subTest(name=name):
                 home = self.home / name
@@ -76,8 +109,10 @@ class WorkspaceSetupTests(unittest.TestCase):
                         workspace.vault(home).mkdir()
                         if name == "settings-file":
                             (workspace.vault(home) / ".obsidian").write_text("original")
+                        elif name == "personal-notes-link":
+                            (workspace.vault(home) / "개인 메모").symlink_to(outside, target_is_directory=True)
                         else:
-                            (workspace.vault(home) / "README.md").symlink_to(outside / "missing")
+                            (workspace.vault(home) / "안내.md").symlink_to(outside / "missing")
                 before = sorted(str(p.relative_to(home)) for p in home.rglob("*"))
                 with patch.object(setup, "find_obsidian", side_effect=AssertionError("app checks must follow preflight")), patch.object(subprocess, "run", side_effect=AssertionError("must not install")):
                     with self.assertRaises(LoopError):
@@ -144,10 +179,13 @@ class WorkspaceSetupTests(unittest.TestCase):
         self.assertEqual(result["vault_sync"]["errors"], [])
         self.assertEqual(KnowledgeBase(selected, vault_home=None).get("human-request", "existing-human"), original)
         self.assertFalse((workspace.data(self.home) / "knowledge.sqlite3").exists())
-        self.assertTrue(any(workspace.vault(self.home).rglob("*--existing-human.md")))
-        note = next(workspace.vault(self.home).rglob("*--existing-human.md"))
+        import json
+        manifest = json.loads((selected / "vault-owned.json").read_text())
+        name = next(name for name, entry in manifest["documents"].items() if entry["kind"] == "human-request" and entry["id"] == "existing-human")
+        note = workspace.vault(self.home) / name
+        self.assertTrue(note.is_file())
         note.write_text("User edited this generated view; preserve it.\n")
-        with patch.object(setup, "find_obsidian", return_value="/Applications/Obsidian.app"), patch.object(setup.subprocess, "run", side_effect=AssertionError("must not install")), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as diagnostics:
+        with patch.object(setup, "find_obsidian", return_value="/Applications/Obsidian.app"), allow_native_tools_but_forbid_brew(), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as diagnostics:
             self.assertEqual(installer.main(["--link", "--workspace", "--home", str(self.home)]), 0)
         self.assertIn("Vault backfill warning", diagnostics.getvalue())
         self.assertEqual(note.read_text(), "User edited this generated view; preserve it.\n")
@@ -162,7 +200,7 @@ class WorkspaceSetupTests(unittest.TestCase):
         note = workspace.vault(self.home) / "my-original-note.md"
         note.parent.mkdir(parents=True)
         note.write_text("Preserve this existing note.\n")
-        with patch("loop_work.knowledge.KnowledgeBase", side_effect=sqlite3.OperationalError("database is locked")), patch.object(setup, "find_obsidian", return_value="/Applications/Obsidian.app"), patch.object(setup.subprocess, "run", side_effect=AssertionError("must not install")), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as diagnostics:
+        with patch("loop_work.knowledge.KnowledgeBase", side_effect=sqlite3.OperationalError("database is locked")), patch.object(setup, "find_obsidian", return_value="/Applications/Obsidian.app"), allow_native_tools_but_forbid_brew(), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as diagnostics:
             self.assertEqual(installer.main(["--link", "--workspace", "--home", str(self.home)]), 0)
         self.assertIn("Vault backfill warning (failed)", diagnostics.getvalue())
         self.assertIn("database is locked", diagnostics.getvalue())
@@ -228,7 +266,7 @@ class WorkspaceSetupTests(unittest.TestCase):
         self.assertEqual((conflict / "SKILL.md").read_text(), "unowned skill")
 
     def test_explicit_workspace_cli_and_make_install_share_opt_in_boundary(self):
-        with patch.object(setup, "find_obsidian", return_value="/Applications/Obsidian.app"), patch.object(setup.subprocess, "run", side_effect=AssertionError("installed app skips brew")), contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(setup, "find_obsidian", return_value="/Applications/Obsidian.app"), allow_native_tools_but_forbid_brew(), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(installer.main(["--link", "--workspace", "--home", str(self.home)]), 0)
         self.assertTrue(workspace.vault(self.home).is_dir())
         self.assertTrue((self.home / ".agents/skills/loop-work").is_symlink())

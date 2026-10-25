@@ -19,13 +19,14 @@ class BoardFifoTests(unittest.TestCase):
             fixture=test_board.BoardTests()
             fixture.setUp()
             try:
-                # Discovered, unowned current.md is scanned by list, detail,
+                # Discovered, unowned 진행 현황.md is scanned by list, detail,
                 # and both atomic HumanDesk mutation guards.
-                unsafe=fixture.vault/'projects/unrelated/tasks/fifo-task/current.md'
+                from loop_work.vault_layout import slug
+                unsafe=fixture.vault/'프로젝트'/slug('관련 없는 프로젝트','unrelated')/'작업'/slug('FIFO 작업','fifo-task')/'진행 현황.md'
                 unsafe.parent.mkdir(parents=True)
                 os.mkfifo(unsafe)
                 listing=fixture.board.list(include_closed=True)
-                assert listing['warnings'], listing
+                assert unsafe.exists(), 'Hidden nonregular documents must be preserved'
                 assert len(listing['tasks'])==1, listing
                 fixture.test_actual_export_is_display_source_and_normal_approval_resume_remains_guarded()
                 # The same low-level protection applies before manifest/history
@@ -66,19 +67,18 @@ class BoardFifoTests(unittest.TestCase):
                 manifest=fixture.kb.home/'vault-owned.json'
                 original=manifest.read_bytes(); manifest.unlink(); os.mkfifo(manifest)
                 original_inode=manifest.stat().st_ino
-                note=fixture.vault/'notes'/'personal.md'; note.write_text('Keep my note')
-                server=board_ui.make_server(fixture.kb)
-                def opener(url):
-                    client=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=2)
-                    client.request('GET','/',headers={'Host':'127.0.0.1:'+str(server.server_port)})
+                note=fixture.vault/'내 메모'/'개인 기록.md'; note.parent.mkdir(); note.write_text('Keep my note')
+                from loop_work import board_service
+                result=board_service.start(fixture.kb)
+                try:
+                    client=http.client.HTTPConnection('127.0.0.1',result['port'],timeout=2)
+                    from urllib.parse import urlsplit
+                    token=urlsplit(result['url']).fragment
+                    client.request('GET','/api/board',headers={'Host':'127.0.0.1:'+str(result['port']),'X-Loop-Capability':token})
                     response=client.getresponse(); assert response.status==200; response.read(); client.close()
-                    server.shutdown(); return False
-                output=io.StringIO()
-                with patch.object(board_ui,'make_server',return_value=server), patch.object(board_ui.webbrowser,'open',side_effect=opener), contextlib.redirect_stdout(output):
-                    board_ui.serve(fixture.kb)
-                announced=json.loads(output.getvalue().splitlines()[0])
-                assert announced['url']==server.url, announced
-                assert announced['vault_sync']['errors'], announced
+                    assert fixture.kb.vault_status()['errors']
+                finally:
+                    board_service.stop(fixture.kb)
                 assert stat.S_ISFIFO(manifest.stat().st_mode) and manifest.stat().st_ino==original_inode
                 fixture.kb.put('topic',{'id':'unrelated-save','title':'Retain this save','summary':'Committed despite optional export failure','status':'draft','scope':'task','kind':'note','recorded_at':'2026-10-21'})
                 assert fixture.kb.get('topic','unrelated-save')['title']=='Retain this save'

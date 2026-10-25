@@ -39,7 +39,8 @@ class VaultLanguagePolicyTests(unittest.TestCase):
     def test_shared_policy_preserves_evidence_and_existing_ownership(self):
         policy = (SOURCE / 'rules/writing.md').read_text()
         for text in ('Write authored task titles', 'in Korean', 'foreign-language deliverable',
-                     'Hangul-character validator', 'including edited', 'ownership conflict or deletion'):
+                     'Hangul-character validator', 'do not overwrite edited or unowned',
+                     'It cannot restore execution authority around an edited or missing document'):
             self.assertIn(text, policy)
         self.assertIn('Korean', (SOURCE / 'rules/work.md').read_text())
         self.assertIn('Korean', (SOURCE / 'skills/loop-work/SKILL.md').read_text())
@@ -58,10 +59,10 @@ class VaultLanguagePolicyTests(unittest.TestCase):
                         'goal': None, 'result': None}
                 original = deepcopy(task)
                 korean = task_document(task, language='ko')
-                self.assertIn('**작업 유형:** ' + expected[kind], korean)
+                self.assertIn('**작업 진행:** ' + expected[kind] + ' · 초안', korean)
                 self.assertIn('원문 explanation API', korean)
                 self.assertEqual(task, original)
                 english = task_document(task)
                 self.assertEqual(english, task_document(task, language='en'))
                 self.assertIn('**Kind:** ' + kind, english)
-                self.assertNotIn('**작업 유형:**', english)
+                self.assertNotIn('**작업 진행:**', english)

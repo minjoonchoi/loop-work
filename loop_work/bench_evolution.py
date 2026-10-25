@@ -51,6 +51,8 @@ def profile(spec):
     # Explicit routing is a new experimental setting, never a retroactive edit.
     if 'activation_protocol' in spec:
         result['activation_protocol'] = spec['activation_protocol']
+    if 'setup_protocol' in spec:
+        result['setup_protocol'] = spec['setup_protocol']
     if 'planning_protocol' in spec:
         result['planning_protocol'] = spec['planning_protocol']
     if 'review_policy' in spec:

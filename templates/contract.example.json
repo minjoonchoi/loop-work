@@ -194,6 +194,7 @@
     "max_run_seconds": 14400,
     "orchestrator": "codex",
     "max_worker_calls": 40,
-    "worker_timeout_seconds": 600
+    "worker_timeout_seconds": 600,
+    "check_failure_policy": "fail_fast"
   }
 }

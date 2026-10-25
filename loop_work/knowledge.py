@@ -15,6 +15,9 @@ import uuid
 from .contract import identifier
 from .storage import HARNESS_SKILL_FILES, LoopError, digest, file_hash, files, git, harness_digest, inside, now
 
+_TOPIC_AUTHORED_FIELDS = ("id", "title", "kind", "scope", "status", "summary", "why", "details", "uncertainty",
+                          "evidence", "basis", "applies_to", "expires_at", "paths")
+
 
 def _export_status(value):
     """Validate only optional exporter diagnostics, never authoritative records."""
@@ -459,8 +462,7 @@ class KnowledgeBase:
         if entry.get("expires_at"):
             if datetime.fromisoformat(entry["expires_at"]).tzinfo is None:
                 raise LoopError("expires_at needs a timezone")
-        item = {key: entry[key] for key in ("id", "kind", "scope", "status", "summary", "why", "details", "uncertainty",
-                                          "evidence", "basis", "applies_to", "expires_at") if key in entry}
+        item = {key: entry[key] for key in _TOPIC_AUTHORED_FIELDS if key in entry}
         item.update(project_id=source["project_id"], checkout_id=location_id,
                     session_id=session_id if entry["scope"] == "session" else None,
                     task_id=task_id if entry["scope"] == "task" else None,
@@ -492,6 +494,19 @@ class KnowledgeBase:
                   "session": ("session_id",), "task": ("task_id",)}
         if old and any(old[key] != item[key] for key in ("scope", *owners[item["scope"]])):
             raise LoopError("An existing topic's scope/owner cannot change; use a new topic ID")
+        authored = set(_TOPIC_AUTHORED_FIELDS) - {"title"}
+        if old and {k: v for k, v in old.items() if k in authored} == {
+                k: v for k, v in item.items() if k in authored}:
+            if ("title" in old, old.get("title")) != ("title" in item, item.get("title")):
+                # A display rename cannot revalidate a conclusion or replace its
+                # original provenance. Decide against the transaction's current
+                # record, including when prepare_topic observed newer sources.
+                renamed = dict(old)
+                if "title" in item:
+                    renamed["title"] = item["title"]
+                else:
+                    renamed.pop("title", None)
+                return self.put("topic", renamed, db)
         provenance = {"recorded_at", "source_session_id", "source_task_id"}
         if item["scope"] in ("global", "project"):
             provenance.add("checkout_id")
@@ -514,7 +529,7 @@ class KnowledgeBase:
         result["sources"] = source_context(observations, task)
         result["harness"] = Harness(self).status(session_id) if session_id else None
         for item in self.list("topic"):
-            if query and query.casefold() not in (item["id"] + " " + item["summary"]).casefold():
+            if query and query.casefold() not in (item["id"] + " " + item.get("title", "") + " " + item["summary"]).casefold():
                 continue
             candidates = {key: o for key, o in observations.items() if o["project_id"] == item["project_id"]}
             scope = item["scope"]
@@ -620,4 +635,11 @@ class KnowledgeBase:
                   "reason": state.get("block_reason"), "next_action": next_action,
                   "progress": f"{len(state['milestones'])}/{len(contract.get('milestones', []))} milestones passed",
                   "result": {"gate": state.get("latest_gate"), "historical": True, "evidence_current": evidence_current}}
+        from .harness import explicit_skill_task
+        previous = self.get("task", record["id"], required=False)
+        # Only first creation consumes state provenance. Later projection must
+        # retain the original task marker/absence, never promote legacy work.
+        origin = previous if previous is not None else state
+        if explicit_skill_task(origin):
+            record["provenance"] = dict(origin["provenance"])
         return self.put("task", record)

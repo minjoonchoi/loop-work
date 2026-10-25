@@ -1,0 +1,1 @@
+Button is adapted from https://github.com/shadcn-ui/ui/blob/main/apps/v4/registry/new-york-v4/ui/button.tsx (2026-10-24). Imports use directly installed Radix Slot and local cn; Korean palette classes added. Original MIT notice retained in SHADCN-MIT.txt.

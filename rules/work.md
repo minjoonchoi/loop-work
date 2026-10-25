@@ -58,7 +58,7 @@ language artifact keeps its requested language with separate Korean tracking.
 ## 1. Set the goal
 
 1. Only an explicit skill prompt starts new work: choose kind and project locations.
-   Create the task with `work open` or development `init` (omit session when unbound),
+   Create the task with `work open --explicit-skill` or development `init --explicit-skill` (omit session when unbound),
    then run `harness on --provider PROVIDER --session SESSION_ID --task TASK_ID`.
    Related corrections/status restore this same task instead of opening another.
 2. Use capsule references and scoped `knowledge context --path PATH` (repeat paths
@@ -81,12 +81,12 @@ language artifact keeps its requested language with separate Korean tracking.
    Resolve required preflight assignments before starting; `goal_setting` assignments
    cannot be rerun after start to repair an unfinished preflight record.
 
-Development uses `init --implementer WORKER --orchestrator CONVERSATION --session SESSION`
-or `work open --kind development`, then `workflow.md`. For several working trees,
+Development uses `init --explicit-skill --implementer WORKER --orchestrator CONVERSATION --session SESSION`
+or `work open --explicit-skill --kind development`, then `workflow.md`. For several working trees,
 create linked goals in the same session and verify every required goal/integration.
 Common `work finish` cannot complete development.
 
-Other work uses `work open --kind KIND --title TITLE --provider PROVIDER --path PATH
+Other work uses `work open --explicit-skill --kind KIND --title TITLE --provider PROVIDER --path PATH
 --session SESSION`, `work goal TASK --input FILE`, then `work start TASK`. The agent
 creates goal input from `work-goal.example.json`; do not ask users for JSON or IDs.
 `--provider` identifies the conversation (`claude`/`codex`); optional `--worker` selects
@@ -148,9 +148,13 @@ Use targeted `work context`, `work note`, `work block`, `work resume` or `work a
 for detail/recovery. Retain unsuccessful attempts. Historical completion cannot supply
 fresh code evidence or publishing/deployment permission.
 
+After successful completion, the main coordinator follows the
+[한국어 하네스 사용 회고](writing.md#작업-완료-후-하네스-사용-회고) with the existing
+task/session and knowledge commands; it is not another completion check.
+
 ## Knowledge boundaries
 
-The local store defaults to `~/.local/share/loop-work/knowledge.sqlite3`; choose another
+A fresh local store uses `~/.loop-work/data/knowledge.sqlite3`; an existing legacy DB is reused without migration. Choose another
 external-to-source home with `LOOP_KB_HOME`/`--knowledge-home`. Store no credentials.
 `knowledge projects` lists identities/checkouts. Git origin groups remote clones;
 local worktrees share common-directory identity; ordinary directories use filesystem
@@ -193,3 +197,8 @@ Execute only on the person's explicit request; preserve controls, history and ca
 Do not dispatch models, reset budgets, complete gates or infer external permissions
 from a desk response. Status/list/UI inspection does not resolve a blocker or resume
 a paused task. Technical investigation within scope remains worker work.
+
+Task creation in the explicit skill branch must include `--explicit-skill`; the
+immutable `provenance` marks that origin. Low-level creation without the flag
+remains usable but does not become a Board task. Relevant ordinary-input memory uses
+[project topics without a task](context.md#ordinary-input-memory-without-a-task).

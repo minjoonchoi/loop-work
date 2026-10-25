@@ -1,28 +1,24 @@
-"""Capability-protected, loopback-only human decision desk."""
+"""Authenticated loopback API transport; native Board supplies its renderer."""
 from __future__ import annotations
 
 import json
 import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from socketserver import TCPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .storage import LoopError
 
 MAX_BODY = 65536
-ASSETS = Path(__file__).with_name('human_ui_assets')
 
 
-def make_server(knowledge, port=0, session_id=None, task_id=None, *, desk=None, assets=None, api_handler=None):
+def make_server(knowledge, port=0, session_id=None, task_id=None, *, desk=None, api_handler=None):
     """Create an unstarted IPv4 loopback server; no settings or browser changes."""
     if type(port) is not int or not 0 <= port <= 65535:
         raise LoopError('Human UI port must be between 0 and 65535')
     if desk is None:
         from .human import HumanDesk
         desk = HumanDesk(knowledge)
-
-    asset_root = ASSETS if assets is None else Path(assets)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -134,10 +130,7 @@ def make_server(knowledge, port=0, session_id=None, task_id=None, *, desk=None, 
                 return
             if self.command != 'GET':
                 self.send_value(405, {'error': 'Method not allowed'}); return
-            asset = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8')}.get(self.path)
-            if not asset:
-                self.send_value(404, {'error': 'Not found'}); return
-            self.send_value(200, (asset_root / asset[0]).read_bytes(), asset[1])
+            self.send_value(404, {'error': 'Not found'}); return
 
         do_GET = request
         do_POST = request
@@ -154,14 +147,3 @@ def make_server(knowledge, port=0, session_id=None, task_id=None, *, desk=None, 
     server.capability_token = secrets.token_urlsafe(32)
     server.url = 'http://127.0.0.1:' + str(server.server_port) + '/#' + server.capability_token
     return server
-
-
-def serve(knowledge, port=0, session_id=None, task_id=None):
-    server = make_server(knowledge, port, session_id, task_id)
-    print(json.dumps({'url': server.url, 'host': '127.0.0.1', 'port': server.server_port}), flush=True)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()

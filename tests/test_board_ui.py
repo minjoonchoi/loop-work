@@ -43,7 +43,7 @@ class BoardUiTests(unittest.TestCase):
         self.assertEqual(self.http('GET','/api/board',headers={'Origin':'https://foreign.example'})[0],403)
         self.assertNotEqual(self.http('GET','/api/board?task_id=other-task')[0],200)
         detail=json.loads(self.http('GET','/api/tasks/'+self.task['id'])[1])
-        path=next(item['path'] for item in detail['documents'] if '/interim/' in item['path'])
+        path=next(item['path'] for item in detail['documents'] if item.get('role')=='interim')
         status,body=self.http('GET','/api/document?path='+quote(path,safe=''))
         self.assertEqual(status,200); self.assertFalse(json.loads(body)['writable'])
         self.assertNotEqual(self.http('GET','/api/document?path=../private')[0],200)
@@ -58,25 +58,8 @@ class BoardUiTests(unittest.TestCase):
         self.assertEqual(self.http('POST',endpoint,value)[0],409)
         self.assertEqual(self.http('POST','/api/requests',{'task_id':self.task['id'],'request':{}})[0],404)
 
-    def test_browser_is_opened_after_serving_and_failure_keeps_url_available(self):
-        extra=board_ui.make_server(self.kb)
-        def opener(url):
-            connection=http.client.HTTPConnection('127.0.0.1',extra.server_port,timeout=3)
-            connection.request('GET','/',headers={'Host':'127.0.0.1:'+str(extra.server_port)})
-            self.assertEqual(connection.getresponse().status,200)
-            connection.close(); extra.shutdown()
-            return False
-        with patch.object(board_ui,'make_server',return_value=extra), patch.object(board_ui.webbrowser,'open',side_effect=opener) as opened, contextlib.redirect_stdout(io.StringIO()) as output:
-            board_ui.serve(self.kb)
-        self.assertEqual(opened.call_args.args[0],extra.url)
-        self.assertIn('printed URL',output.getvalue())
-
-    def test_headless_mode_never_opens_browser_and_startup_export_failure_is_nonfatal(self):
-        class Server:
-            server_port=12345; url='http://127.0.0.1:12345/#test'
-            def serve_forever(self): pass
-            def shutdown(self): pass
-            def server_close(self): pass
-        with patch.object(self.kb,'sync_vault',side_effect=OSError('export unavailable')), patch.object(board_ui,'make_server',return_value=Server()), patch.object(board_ui.webbrowser,'open',side_effect=AssertionError('headless mode must not open browser')), contextlib.redirect_stdout(io.StringIO()) as output:
-            board_ui.serve(self.kb,open_browser=False)
-        self.assertIn('export unavailable',output.getvalue())
+    def test_api_server_never_serves_html_or_static_assets(self):
+        self.assertFalse(hasattr(board_ui,'serve'))
+        for path in ('/','/index.html','/app.js','/style.css','/editor.js','/markdown.js'):
+            status,body=self.http('GET',path)
+            self.assertEqual(status,404);self.assertNotIn(self.server.capability_token.encode(),body)

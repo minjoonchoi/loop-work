@@ -52,6 +52,14 @@ inventory/absence reference when requesting existing-test coverage.
 Do not include unrelated context. If the relevant read set is unknown, assign a
 bounded analysis first and use its evidence to create the next assignment.
 
+For GUI verification, link the relevant [state combinations](workflow.md#2-resolve-only-human-owned-uncertainty).
+Retain actual default argv, absolute installed entrypoint, explicit feature flags and
+post-install binary/config evidence; keep fixtures/outputs outside source inputs.
+Freeze feature/cache locations for comparisons. On resource-pressure evidence, record
+disk availability/cache size and the original ENOSPC error: setup failure is not worker
+quality. Preserve unfinished checks and other caches/user files; cleanup is limited to
+authorized current-task artifacts. Do not change profiles or erase consumed attempts.
+
 ## Execute and inspect
 
 ```sh

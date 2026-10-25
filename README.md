@@ -8,11 +8,17 @@
 문서·설명·조사·계획은 결과를 작성해 완료 조건을 확인합니다. 에이전트가 실행 상태와 로컬 지식을
 관리하므로 사용자가 코드 구조, 이전 답변, 다음 행동을 프롬프트마다 다시 설명할 필요가 없습니다.
 
+완료 뒤에는 [짧은 한국어 사용 회고](rules/writing.md#작업-완료-후-하네스-사용-회고)를 기존 작업·지식에 연결합니다.
+관측된 도움·방해와 미검증 개선 제안을 구분하며, 회고가 스킬을 자동 수정하거나 새 검증 gate를 만들지는 않습니다.
+
 ## 시작
 
 하네스 실행 환경은 macOS/Linux, Python 3.10+, Git입니다. Windows는 WSL을 사용합니다.
 기본 `make install`은 사용자 요청에 따라 Obsidian을 확인하고, 없으면 기존 Homebrew로
-설치한 뒤 `~/.loop-work/vault` 문서 공간을 준비합니다. Python 런타임에는 추가 패키지가 필요 없습니다.
+설치한 뒤 `~/.loop-work/vault` 문서 공간을 준비합니다. macOS에서는 프로젝트 로컬 Tauri 2/Rust 빌드로
+`Loop Work.app`도 설치합니다. Python 런타임에는 추가 패키지가 필요 없습니다.
+GUI 빌드는 프로젝트 로컬 `npm ci`와 Cargo 의존성을 사용합니다. 전역 도구·패키지 설치,
+시스템 설정 변경·로그인·실제 사용자 HOME 설치는 기존 명시적 승인 범위를 따릅니다.
 실제 작업은 로그인된 Claude Code 또는 Codex CLI에 위임합니다. 개발은 대상 Git 저장소와 작업 CLI가 필요합니다. 반대 CLI가 설치돼 있으면 교차 검토하고,
 없으면 같은 제공자의 새 독립 호출로 검토합니다. 선택은 사전 기록하며 호출 실패로 바꾸지 않습니다. 문서·설명은 일반 디렉터리에서 작업 CLI 하나로 수행합니다.
 작업 전에는 에이전트가 사용 가능한 모델·effort와 상대적인 비용·능력 순위를
@@ -29,8 +35,12 @@ make install
 ```
 
 설치 시 단일 vault 폴더와 `.obsidian`을 준비하며 기존 노트·설정은 덮어쓰지 않습니다.
-앱의 전역 vault 등록·동기화·플러그인 설정은 바꾸지 않습니다. Obsidian에서 이 폴더를 열면 됩니다.
-앱이 없을 때 자동 설치는 기존 Homebrew가 필요하며, Homebrew 자체는 설치하지 않습니다.
+Loop Work 앱은 사용자 설치에서 `~/Applications/Loop Work.app`, TARGET 설치에서
+`<project>/.loop/Loop Work.app`에 둡니다. Finder에서 열거나 Dock에서 다시 열 수 있습니다.
+Dock 등록·로그인 항목·시스템 설정을 자동 변경하지 않습니다. 필요한 Rust·Node 빌드 도구가 없으면 원인을 보고하며
+자동 다운로드하지 않습니다. 데스크톱 앱은 macOS 전용이고 Linux는 하네스와 텍스트 CLI를 사용합니다.
+Obsidian 앱의 전역 vault 등록·동기화·플러그인 설정은 바꾸지 않습니다. Obsidian에서 이 폴더를 열면 됩니다.
+Obsidian이 없을 때 자동 설치는 기존 Homebrew가 필요하며, Homebrew 자체는 설치하지 않습니다.
 설치가 지원되지 않거나 실패하면 원인을 표시하고 성공으로 처리하지 않습니다. 앱 설치와 vault 준비는
 `make install`의 설치 단계이고, 작업 실행이나 저수준 복사/벤치마크 설치가 brew를 호출하지 않습니다.
 `make uninstall`은 하네스 연결만 해제하며 Obsidian·vault·작업 기록을 보존합니다.
@@ -89,16 +99,18 @@ make uninstall
 
 ## 작업 보드 열기
 
-Codex에서는 **`$loop-work board serve`**, Claude Code에서는 **`/loop-work board serve`**로
-작업 보드를 엽니다. `board`만 적어도 serve로 처리합니다. localhost 서버를 시작하고 기본
-브라우저를 자동으로 열며, `--no-open`이면 서버만 실행합니다. 요청한 로컬 화면을 여는 데
-다시 승인을 요구하지 않습니다.
+먼저 `make install`로 `.app`을 설치해야 합니다. 아래 소스 CLI의 `board open` 예제도 이 설치된 앱을 사용합니다.
+macOS에서는 설치된 **Loop Work.app**을 Finder에서 열어 작업을 추적합니다.
+Codex의 **`$loop-work board`**, Claude Code의 **`/loop-work board`** 또는 `loop-work board open`도
+같은 데스크톱 창을 엽니다. `board`만 적으면 open으로 처리합니다.
+Tauri 2 앱은 React·shadcn·Motion·ECharts·ReactFlow·Rive 전면을 사용합니다. Python은 인증된 내부 API만 제공하며 HTML·정적 자산이나 외부 브라우저 기능을 제공하지 않습니다.
+`board start`는 창을 열지 않고 관리 backend만 준비합니다. Linux는 하네스와 텍스트 CLI를 지원하며 앱 열기는 macOS 전용입니다.
+명시한 로컬 앱 열기에 다시 승인을 요구하지 않습니다.
 
 ```sh
-python3 scripts/loop.py board serve --port 0
+python3 scripts/loop.py board open --port 0
 # 별도 지식 홈: --knowledge-home을 subcommand 앞에 두고 vault도 명시
-# python3 scripts/loop.py --knowledge-home /absolute/knowledge board serve --vault /absolute/vault
-# 브라우저를 열지 않으려면 뒤에 --no-open
+# python3 scripts/loop.py --knowledge-home /absolute/knowledge board open --vault /absolute/vault
 ```
 
 작업 카드·상세·추적 문서·사람 요청의 **표시 데이터는 Obsidian vault의 Markdown**입니다.
@@ -115,7 +127,7 @@ board는 활성화보다 먼저 분기하며 기존 entrypoint·knowledge home·
 재개는 pause 피드백만 해제하며 phase blocker·예산·QA를 우회하지 않습니다. 중지는 관찰 지점에서
 실제 진행 중 호출을 멈추며 이미 적용된 변경을 자동 되돌린다고 약속하지 않습니다.
 
-기존 `$loop-work human` / `/loop-work human`과 `human list|show|request|respond|execute|serve`
+기존 `$loop-work human` / `/loop-work human`과 `human list|show|request|respond|execute`
 CLI는 호환성을 유지합니다. 새 요청 생성·명시 대체 등 CLI 관리는 [운영 문서](docs/operations.md#사람의-결정과-수동-조치)를 따릅니다.
 
 ## 기존 loop-dev 설치에서 전환
@@ -242,21 +254,25 @@ flowchart TD
 ## Obsidian에서 결과 읽기
 
 보드는 `~/.loop-work/vault`의 Markdown을 표시 데이터로 사용합니다. 같은 문서를 Obsidian에서도 엽니다.
-새 문서는 `projects/인증서버--<project-id>/tasks/권한검사-수정--<task-id>/현재-권한검사-수정--<task-id>.md`처럼
-프로젝트·작업 내용을 이름으로 구분하고 안정적인 ID를 함께 유지합니다. 기존 관리 경로는 이동하지 않고
-한국어 프로젝트·주제·작업 색인에서 연결합니다. 한국어 설명과 상태를 사용하되 사용자 원문·코드·명령·증거는 바꾸지 않습니다. 마지막 상태를
-보고, `interim/`·`final/`에서 시점별 중간/완료 기록을 읽습니다. 직접 쓸 메모는 `notes/`에 둡니다.
-완료 파일의 존재만으로 현재 QA 통과나 최신 근거가 보장되지는 않습니다. 원본은 DB와 개발 JSON이며
-사람 노트는 보존합니다. 출력 오류는 하네스 실행을 막지 않습니다. 경로·근거 전달 범위는
-[지식 운영](docs/knowledge.md#obsidian-문서-공간)을 따릅니다.
+`안내.md`에서 시작해 `프로젝트/인증 서비스--<8자리>/목록.md`를 엽니다. 프로젝트의 `지식/`에서
+설계·결정·회고를, `작업/권한 검사 수정--<8자리>/진행 현황.md`에서 현재 작업을 읽습니다.
+같은 작업의 `기록/중간/`·`기록/완료/`는 시점별 근거입니다. `프로젝트 안내.md`와 `작업 문서.md`는
+사람이 편집하는 문서이며 직접 쓸 메모는 `개인 메모/`에 둡니다. 짧은 식별자는 이름 충돌을 구분합니다.
+현행 runtime은 layout 3만 지원하며 기존 문서는 별도 보존형 변환 도구로 전환합니다.
+기존 사람 문서·삭제·편집 충돌을 새 복사본으로 우회하거나 실행 권한을 복구하지 않습니다.
+한국어 설명과 상태를 사용하되 사용자 원문·코드·명령·증거는 바꾸지 않습니다.
+완료 파일의 존재만으로 현재 QA 통과나 최신 근거가 보장되지는 않습니다. 실행·권한·검증 원본은
+DB와 개발 JSON이며 사람 노트는 보존합니다. 출력 오류는 하네스 실행을 막지 않습니다.
+자세한 경로와 근거 전달 범위는 [지식 운영](docs/knowledge.md#obsidian-문서-공간)을 따릅니다.
 
 ## 읽기 쉬운 실행 기록
 
-실행 상태는 **목표·현재 단계·근거·다음 행동/장애**로, 지식은 **결론·적용 범위·상태·근거**로 작성합니다.
+실행 상태는 **목표·현재 단계·근거·다음 행동/장애**로, 지식은 **짧은 제목·결론·활용 목적·확인한 내용·적용 범위와 한계·근거**로 작성합니다.
 필요하면 이유, 세부사항, 불확실성만 추가합니다. Markdown은 저장된 구조화 데이터에서 생성하므로
 에이전트와 사람이 서로 다른 요약을 읽지 않습니다.
 
-요약은 한 줄 280자 이내이며 선택적인 세부사항은 최대 다섯 개입니다. 긴 설명과 모든 근거는
+새 지식의 `title`은 한 줄 60자 이하의 한국어 명사구로 작성하고 결론 전체는 `summary`에 남깁니다.
+긴 식별자와 JSON 링크는 접힌 원본 정보로 보냅니다. 요약은 한 줄 280자 이내이며 선택적인 세부사항은 최대 다섯 개입니다. 긴 설명과 모든 근거는
 연결된 전달물·JSON에 보존합니다. 중복 내용, 임시 문구, 과도하게 긴 요약은 저장 단계에서 거절합니다.
 변화 없는 기록은 새 버전으로 쌓지 않고, 목록은 개수·검색·페이지로 탐색합니다.
 문장 의미와 근거의 정확성은 에이전트가 확인합니다. 길이 검사만으로 글의 품질을 보장하지 않습니다.
@@ -275,7 +291,7 @@ flowchart TD
 | 작업 결속 | `harness on --task TASK_ID`, `harness status`, `harness off` |
 | 공통 작업 | `work open`, `work goal`, `work start`, `work delegate`, `work team`, `work assess`, `work finish` |
 | 메인 복구·피드백 | `orchestration context`, `orchestration feedback` |
-| vault 작업 보드 | `board serve`(기본 브라우저 열기), `board serve --no-open`(서버만) |
+| vault 작업 보드 | `board open`(macOS 앱), `board start`(backend만 준비) |
 | 지식 재사용·갱신 | `knowledge context`, `knowledge remember`, `knowledge get`, `knowledge history` |
 | 프로젝트 연결 | `knowledge projects`, `knowledge attach` |
 | 개발 | `init`, `delegate`, `team`, `assess`, `validate`, `doctor`, `plan-review`, `freeze`, `start`, `checkpoint`, `finish` |
@@ -343,6 +359,12 @@ python3 scripts/benchmark.py \
 
 ## 개발 및 검증
 
+관련 GUI 상태 조합과 `check_failure_policy`는 [개발 규칙](rules/workflow.md)에 둡니다.
+신규 계약은 `fail_fast`, 명시 선택은 `diagnostic_continue`, 기존 필드 누락은 continue입니다.
+`not_run_checks`는 성공이 아니며 최종 fresh 전체검사·독립 검토는 그대로 필요합니다.
+GUI 설치·자원·단계 근거는 [운영 안내](docs/operations.md#이-저장소의-검증-범위)를 따릅니다.
+
+
 ```sh
 python3 -m unittest discover -s tests -v
 git diff --check
@@ -378,3 +400,75 @@ typed 근거 입력이 필수이며 reason-only 입력은 거절합니다. 실�
 원래 실패·시도 이력과 최종 검증 조건을 보존합니다. V2 위임은 검증 책임, 누적 정정,
 exact-base patch와 standalone request revision을 지원합니다(팀은 revision 1 한정).
 [입력·마이그레이션 안내](docs/operations.md#typed-block-and-retirement)를 따릅니다.
+
+### 독립 실행 명령과 보드 서버
+
+`make install`은 스킬과 같은 설치 진입점을 사용하는 실행 명령도 설치합니다.
+사용자 설치는 `~/.local/bin/loop-work`, `TARGET` 설치는 `<project>/.loop/bin/loop-work`입니다.
+PATH와 shell 설정은 바꾸지 않습니다. PATH에 없다면 출력된 절대 경로로 호출하세요.
+기존 비소유 명령이나 사용자가 수정한 설치 파일은 덮어쓰지 않습니다.
+
+```sh
+loop-work board start
+loop-work board status
+loop-work board stop
+loop-work board start --project PROJECT_ID
+```
+
+`start`는 인증된 같은 설정의 관리 서버만 만들거나 재사용하며 앱이나 브라우저를 열지 않습니다.
+이 CLI 서버는 앱이 종료되어도 유지하며 `status`/`stop`으로 관리합니다. `open`에서
+앱 helper가 새로 시작한 서버만 앱 종료·helper 입력 EOF 때 해당 nonce를 확인해 종료합니다.
+창 닫기는 앱을 숨기고 Dock 재실행으로 복원합니다. 종료 시 저장되지 않은 내용·IME·충돌·응답 미확인은
+한국어 확인으로 보호합니다. 창 닫기나 앱 종료는 작업 pause·재개·승인·QA 변경이 아닙니다.
+`stop`은 소유 instance의 인증된 shutdown만 요청하며, PID 파일만 보고 다른 프로세스나
+기존 미관리 서버를 종료하지 않습니다. `unknown` 상태는 자동 재시작하거나 강제 종료하지
+않습니다. 사용자 DB·vault는 서버 중지와 설치 해제 후에도 보존합니다.
+
+커스텀 저장소는 `loop-work --knowledge-home /path/to/kb board start --vault /path/to/vault`처럼
+명시합니다. 같은 KB/vault/session/task/project 설정으로 status와 stop을 호출하세요.
+프로젝트 고정 보드는 목록·문서·위키·질문·저장·제어 모두 해당 project 범위만 허용합니다.
+위키 편집은 표시 이름과 실제 vault Markdown을 저장하며 원래 실행 계약·QA·예산을 변경하지 않습니다.
+
+일반 대화와 Board 작업은 구분합니다. 현재·미래의 명시 작업에 필요한 일반 입력의 사실이나
+사용자 결정은 프로젝트 지식 topic으로 선별해 Obsidian에 남길 수 있습니다. 이 과정은 task·session·
+활성화·예산을 새로 만들지 않으며 모든 프롬프트를 수집하지 않습니다. 원문 출처와 적용 범위를
+보존하고, 이후 작업은 topic ID/revision을 참조합니다. 기억된 내용만으로 승인이나 완료가 되지 않습니다.
+
+명시 스킬 작업의 내부 생성 명령은 `work open --explicit-skill` 또는 `init --explicit-skill`입니다.
+Board에는 이 출처가 기록된 작업만 표시합니다. 플래그 없는 저수준·과거 작업은 DB/vault에 보존하며
+자동으로 출처를 소급 부여하지 않습니다. 작업 없는 프로젝트는 실제 project index Markdown이 있을 때만 Board의 프로젝트 위키로 확인할 수
+있습니다. topic 문서만 있는 지식은 Obsidian에 남으며 Board 프로젝트 항목을 만들지 않을 수 있습니다.
+Board는 누락된 project index를 DB 정보로 대신 채우지 않으며, 출력 진단은 식별자 없는 집계로 표시합니다.
+
+## 데스크톱 전면 검증
+
+프로젝트 로컬 GUI 의존성을 설치한 뒤 다음 명령으로 전면과 native bridge를 확인합니다.
+아래는 검증 명령이며 실행 결과나 통과를 뜻하지 않습니다. 실제 macOS 창 검사는 로그인된
+그래픽 세션이 필요합니다. 전역 toolchain·시스템 설정은 자동 설치하지 않습니다.
+
+```sh
+cd desktop
+npm ci
+npm run check
+npm test -- --run
+npm run build
+cargo test --manifest-path src-tauri/Cargo.toml
+npm run verify:renderer
+npm run verify:native
+```
+
+검증 결과는 실행한 binary와 입력 방식을 함께 읽어야 합니다. 일반 배포 binary의 실제 시작·종료
+검사와, 기본값에서 꺼진 `native-qa` feature의 별도 감사 binary 검사는 서로 다른 근거입니다.
+감사 binary는 실제 Tauri WebView → Rust `board_request` → Python API와 임시 populated vault를
+사용해 편집·사람 응답/승인·제어·창 숨김/다시 열기·종료 deadline을 점검합니다. DOM 이벤트,
+IME composition 이벤트와 media query를 programmatic 방식으로 주입한 결과는 물리 키보드·OS IME
+조작 검증이 아니며 `physical_gui_input_verified=false`로 구분합니다. 감사 기능은 일반 앱에서 켜지지 않습니다.
+이 검증으로 모델 결과 품질이나 처리 속도 향상을 주장하지 않습니다. 현재 전후 벤치마크는
+inconclusive이며, 통과 여부는 각 실행의 원본 report를 따릅니다.
+
+종료 확인은 요청 ID별 guard로 입력·새 작업 전송을 잠그고, 저장을 기다린 뒤 미결 요청·편집·조합·
+충돌·초안을 다시 확인합니다. 실제 native dialog에서 같은 요청 ID의 취소가 돌아오면 편집을 다시
+허용합니다. 종료 응답 IPC가 만료되거나 실패하면 오류를 알리고 해당 시도의 guard를 해제해
+계속 편집할 수 있게 합니다. 사람 응답이나 실행의 접수가 불명확하면 자동 재전송하지 않습니다. 사용자가
+**원래 요청 확인·재시도**를 누른 경우에만 최신 원본과 runtime/vault revision을 대조하고,
+변경되지 않은 원래 payload를 재시도합니다. 그 사이 작성한 새 원문은 보존합니다.

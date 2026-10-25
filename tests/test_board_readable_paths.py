@@ -19,7 +19,7 @@ class BoardReadableOwnershipTests(unittest.TestCase):
         (self.project/'README.md').write_text('실제 입력 원문\n')
         self.vault=self.base/'vault'; self.kb=KnowledgeBase(self.base/'knowledge')
         self.work=Work(self.kb)
-        self.task=self.work.open('document','삭제를 존중할 작업','codex',[self.project])['task']
+        self.task=self.work.open('document','삭제를 존중할 작업','codex',[self.project],explicit_skill=True)['task']
         self.kb.vault_home=self.vault; self.board=Board(self.kb)
 
     def request(self):
@@ -36,7 +36,7 @@ class BoardReadableOwnershipTests(unittest.TestCase):
                   'writable_current':any(row['writable'] for row in tasks),
                   'available_control':any(row.get('control',{}).get('available',False) for row in tasks),
                   'writable_approval':bool(approval and approval['writable']),
-                  'friendly_current_files':[str(path.relative_to(self.vault)) for path in self.vault.rglob('현재-*.md')]}
+                  'friendly_current_files':[str(path.relative_to(self.vault)) for path in self.vault.rglob('진행 현황.md')]}
         self.assertEqual(observed,{'removed_note_exists':False,'writable_current':False,'available_control':False,
                                    'writable_approval':False,'friendly_current_files':[]},observed)
         if approval is not None:
@@ -45,19 +45,21 @@ class BoardReadableOwnershipTests(unittest.TestCase):
         self.assertEqual(self.kb.get('human-request',request['id']),request)
         self.assertEqual(self.kb.list('feedback'),[])
 
-    def test_unowned_legacy_conflict_then_user_delete_cannot_become_owned(self):
-        name='projects/'+self.task['project_ids'][0]+'/tasks/'+self.task['id']+'/current.md'
-        legacy=self.vault/name; legacy.parent.mkdir(parents=True)
-        envelope={'version':1,'kind':'task','id':self.task['id'],'knowledge_home':str(self.kb.home),'record':self.task}
-        legacy.write_text('---\nloop_work: '+json.dumps(envelope,ensure_ascii=False)+'\n---\n사람이 소유한 기존 문서\n')
+    def test_unowned_current_conflict_then_user_delete_cannot_become_owned(self):
+        from loop_work.vault_layout import slug
+        pid=self.task['project_ids'][0]
+        name='프로젝트/'+slug(self.project.name,pid)+'/작업/'+slug(self.task['title'],self.task['id'])+'/진행 현황.md'
+        current=self.vault/name; current.parent.mkdir(parents=True)
+        envelope={'version':3,'kind':'task','id':self.task['id'],'knowledge_home':str(self.kb.home),
+                  'record':self.task,'role':'current','project_id':pid,'task_id':self.task['id']}
+        current.write_text('---\nloop_work: '+json.dumps(envelope,ensure_ascii=False)+'\n---\n사람이 소유한 기존 문서\n')
         first=self.kb.export_vault('task',self.task['id'])
-        self.assertTrue(first['errors']); self.assertIn('사람이 소유한 기존 문서',legacy.read_text())
+        self.assertTrue(first['errors']); self.assertIn('사람이 소유한 기존 문서',current.read_text())
         request=self.request(); task_before=self.kb.get('task',self.task['id'])
         self.assertFalse(self.board.show(self.task['id'],'task')['writable'])
-        legacy.unlink()
-        self.kb.sync_vault()
+        current.unlink(); self.kb.sync_vault()
         self.assertEqual(self.kb.get('task',self.task['id']),task_before)
-        self.assert_no_regained_authority(request,legacy)
+        self.assert_no_regained_authority(request,current)
 
     def test_lost_manifest_deleted_current_and_new_title_cannot_create_fresh_authority(self):
         self.kb.sync_vault(); request=self.request()

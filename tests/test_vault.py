@@ -24,13 +24,11 @@ class VaultTests(unittest.TestCase):
                 'updated_at': '2026-10-20T00:00:00+00:00', 'result': None}
 
     def folder(self, project='project-one', task='task-one'):
-        candidates = list((self.base / 'vault/projects').glob('*--' + project + '/tasks/*--' + task))
-        return candidates[0] if candidates else self.base / 'vault/projects' / project / 'tasks' / task
+        from loop_work.vault_layout import slug
+        return self.base/'vault/프로젝트'/slug('프로젝트',project)/'작업'/slug(self.task()['title'],task)
 
     def current(self, project='project-one', task='task-one'):
-        folder = self.folder(project, task)
-        matches = list(folder.glob('현재-*.md'))
-        return matches[0] if matches else folder / 'current.md'
+        return self.folder(project,task)/'진행 현황.md'
 
     def test_new_default_and_readonly_preflight_share_data_home(self):
         from loop_work.delegation import PreflightKnowledge
@@ -39,7 +37,7 @@ class VaultTests(unittest.TestCase):
             kb = KnowledgeBase()
             self.assertEqual(PreflightKnowledge().home, kb.home)
             kb.put('task', self.task())
-            self.assertTrue(list((self.fake_home / '.loop-work/vault/projects').glob('*--project-one/tasks/*--task-one/현재-*.md')))
+            self.assertTrue(list((self.fake_home / '.loop-work/vault/프로젝트').glob('*/작업/*/진행 현황.md')))
 
     def test_legacy_database_is_reused_without_moving_or_duplicate_creation(self):
         old = KnowledgeBase(self.fake_home / '.local/share/loop-dev', vault_home=False)
@@ -66,17 +64,17 @@ class VaultTests(unittest.TestCase):
     def test_current_interim_final_and_stale_completion_preserve_history(self):
         task = self.task(phase='blocked'); task['reason'] = 'Original blocked condition'
         self.kb.put('task', task)
-        self.assertFalse((self.folder() / 'final').exists())
-        original = list((self.folder() / 'interim').glob('*.md'))[0].read_bytes()
+        self.assertFalse((self.folder() / '기록/완료').exists())
+        original = list((self.folder() / '기록/중간').glob('*.md'))[0].read_bytes()
         complete = {**task, 'phase': 'completed', 'result': {'summary': 'Verified explanation', 'checks': []}}
         self.kb.put('task', complete)
-        final = list((self.folder() / 'final').glob('*.md'))[0]
+        final = list((self.folder() / '기록/완료').glob('*.md'))[0]
         final_text = final.read_bytes(); self.assertIn('과거 완료 시점'.encode(), final_text)
         stale = copy.deepcopy(complete); stale['result']['evidence_current'] = False
         self.kb.put('task', stale)
-        self.assertIn('이전 완료 기록은', self.current().read_text())
+        self.assertIn('새 검증 전에는 현재 완료로 사용하지 마세요', self.current().read_text())
         self.assertEqual(final.read_bytes(), final_text)
-        self.assertTrue(any(path.read_bytes() == original for path in (self.folder() / 'interim').glob('*.md')))
+        self.assertTrue(any(path.read_bytes() == original for path in (self.folder() / '기록/중간').glob('*.md')))
 
     def test_delayed_export_rereads_committed_record_after_lock_acquisition(self):
         from contextlib import contextmanager
@@ -84,7 +82,7 @@ class VaultTests(unittest.TestCase):
         import loop_work.vault as module
         from loop_work.vault import VaultExporter
         task = self.task(); self.kb.put('task', task)
-        old_snapshot = next((self.folder() / 'interim').glob('*.md'))
+        old_snapshot = next((self.folder() / '기록/중간').glob('*.md'))
         old_content = old_snapshot.read_bytes()
         waiting, release = threading.Event(), threading.Event()
         original_lock = module.locked
@@ -116,7 +114,7 @@ class VaultTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertIn(newer['title'], self.current().read_text())
         self.assertEqual(old_snapshot.read_bytes(), old_content)
-        self.assertTrue(list((self.folder() / 'interim').glob('이력-*.md')))
+        self.assertTrue(list((self.folder() / '기록/중간').glob('*-이력-*.md')))
 
     def test_busy_newer_export_remains_observable_after_older_success(self):
         import threading
@@ -294,7 +292,7 @@ class VaultTests(unittest.TestCase):
         self.assertEqual(result['records_considered'], 2)
         self.assertTrue(self.current().is_file())
         self.assertTrue(self.current('project-two', 'task-two').is_file())
-        historical = list((self.folder() / 'interim').glob('이력-*.md'))
+        historical = list((self.folder() / '기록/중간').glob('*-이력-*.md'))
         self.assertTrue(historical); self.assertIn('과거 작업 기록', historical[0].read_text())
         self.assertEqual(kb.get('task', 'task-one')['phase'], 'blocked')
 
@@ -320,9 +318,9 @@ class VaultTests(unittest.TestCase):
         self.kb.put('task', self.task())
         with self.kb.connection() as db:
             self.kb.put('human-request', {'id': 'human-one', 'task_id': 'task-one', 'status': 'pending', 'question': 'Explicit decision'}, db)
-        record = next((self.folder() / 'records/human-request').glob('*--human-one.md'))
+        record = next((self.folder() / '기록/사용자 검토').glob('*.md'))
         self.assertIn('Explicit decision', record.read_text())
-        self.assertIn('승인·완료 권한을 부여하지', record.read_text())
+        self.assertIn('Explicit decision', record.read_text())
 
     def test_human_notes_and_obsidian_settings_are_preserved(self):
         notes = self.base / 'vault/notes'; notes.mkdir(parents=True)

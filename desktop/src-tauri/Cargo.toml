@@ -1,0 +1,22 @@
+[package]
+name = "loop-work-desktop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+[features]
+default = []
+native-qa = []
+
+[build-dependencies]
+libc = "0.2"
+tauri-build = { version = "2", features = [] }
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+libc = "0.2"
+ureq = { version = "2.12", default-features = false, features = ["json"] }
+[profile.release]
+strip = true

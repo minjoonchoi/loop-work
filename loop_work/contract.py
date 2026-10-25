@@ -27,7 +27,8 @@ def template(goal_id, title, implementer):
         "open_questions": [], "rules": [], "checks": [], "milestones": [],
         "execution": {"orchestrator": implementer, "implementer": implementer, "max_worker_calls": 40,
                       "worker_timeout_seconds": 600, "max_gate_attempts": 3,
-                      "review_timeout_seconds": 600, "max_run_seconds": 14400},
+                      "review_timeout_seconds": 600, "max_run_seconds": 14400,
+                      "check_failure_policy": "fail_fast"},
     }
     configure_routing(value["execution"], import_environment=True, required=False)
     return value
@@ -160,6 +161,9 @@ def validate(contract, discovery, root, review_provider=None):
     execution = contract.get("execution", {})
     if not isinstance(execution, dict):
         return errors + ["execution must be an object"]
+    if "check_failure_policy" in execution:
+        require(execution["check_failure_policy"] in ("fail_fast", "diagnostic_continue"),
+                "execution.check_failure_policy must be fail_fast or diagnostic_continue")
     require(execution.get("implementer") in ("claude", "codex"), "implementer must be claude or codex")
     require(execution.get("orchestrator", execution.get("implementer")) in ("claude", "codex"),
             "orchestrator must be claude or codex")

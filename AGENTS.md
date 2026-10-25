@@ -3,11 +3,23 @@
 This repository builds the portable harness, not a target application. Read README.md
 and docs/architecture.md before behavior changes. Keep Claude Code/Codex behavior
 identical; keep the runtime Python 3.10+ standard library on macOS/Linux, without
-Python dependency installs, vendor SDKs, API keys or global hook changes. The user's
+Python dependency installs, backend vendor SDKs, API keys or global hook changes. The user's
 explicit installation contract is an exception for the default `make install` setup:
 check for Obsidian, install it through existing Homebrew if absent, and create the
 single `~/.loop-work/vault` document workspace. Do not install Homebrew itself or
-change existing vault/app settings. Preserve user instructions/settings/files.
+change existing vault/app settings. On macOS, the same scoped installation also
+builds the Loop Work desktop app with Tauri 2/Rust and React, using shadcn, Motion,
+ECharts, ReactFlow and Rive. Project-local npm/cargo dependency installation and builds
+are authorized for this GUI; global toolchain/package installation, system settings
+changes and login still require explicit approval. Missing toolchains fail clearly
+without automatic installation. Python backend execution remains standard-library-only;
+the desktop GUI is supported on macOS and Linux retains the non-GUI CLI. Real user-HOME
+installation retains the explicit approval requirements.
+Preserve user instructions/settings/files.
+When a new implementation replaces existing behavior, remove the superseded code,
+backward-compatibility branches, aliases and obsolete tests/docs in that change.
+Preserve user data/settings and audit history; removing compatibility is not permission
+to delete those records or retroactively rewrite frozen execution contracts.
 There is no requirement to run this unfinished harness on itself: the user's task and
 explicit decisions are the current development contract.
 
@@ -63,3 +75,9 @@ If live CLIs are unavailable, complete implementation checks and retain unverifi
 
 Repository runtime: `python3 scripts/loop.py`; installed skills use their returned
 absolute entrypoint. Low-level copied projects can use `python3 .loop/loop.py`.
+
+Ordinary conversation information may be retained selectively as project knowledge
+when relevant to present/future explicit work, without a new task/session or binding.
+Follow `rules/context.md` memory-only boundaries and preserve actual source references.
+Only the explicit skill branch creates tasks with `--explicit-skill`; absent/legacy
+origin remains hidden from Board tasks without deleting KB/vault history.
